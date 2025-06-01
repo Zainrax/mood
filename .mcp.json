@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "github.com/isaacphi/mcp-language-server": {
+      "type": "stdio",
+      "command": "--workspace",
+      "args": [
+        "./",
+        "--lsp",
+        "rust-analyzer"
+      ],
+      "env": {}
+    }
+  }
+}
