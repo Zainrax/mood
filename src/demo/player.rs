@@ -80,7 +80,7 @@ fn record_player_directional_input(
 #[reflect(Resource)]
 pub struct PlayerAssets {
     #[dependency]
-    moodel: Handle<VelloSvg>,
+    pub moodel: Handle<VelloSvg>,
     #[dependency]
     pub steps: Vec<Handle<AudioSource>>,
 }

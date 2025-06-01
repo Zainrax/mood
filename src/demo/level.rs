@@ -5,7 +5,10 @@ use bevy::prelude::*;
 use crate::{
     asset_tracking::LoadResource,
     audio::music,
-    demo::player::{PlayerAssets, player},
+    demo::{
+        ai::{spawn_ai_bundle, AiAssets, AiSpawnConfig},
+        player::{PlayerAssets, player},
+    },
     screens::Screen,
 };
 
@@ -35,19 +38,43 @@ pub fn spawn_level(
     mut commands: Commands,
     level_assets: Res<LevelAssets>,
     player_assets: Res<PlayerAssets>,
+    mut ai_assets: ResMut<AiAssets>,
     mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
 ) {
-    commands.spawn((
+    // Initialize AI assets to use the same sprite as player for now
+    // In a real game, you'd load a different sprite for AI entities
+    if ai_assets.sprite.is_weak() {
+        ai_assets.sprite = player_assets.moodel.clone();
+    }
+
+    // Get AI spawn configuration
+    let ai_config = AiSpawnConfig::default();
+
+    // Spawn the level entity with player and AI entities
+    let mut level = commands.spawn((
         Name::new("Level"),
         Transform::default(),
         Visibility::default(),
         StateScoped(Screen::Gameplay),
-        children![
-            player(400.0, &player_assets, &mut texture_atlas_layouts),
-            (
-                Name::new("Gameplay Music"),
-                music(level_assets.music.clone())
-            )
-        ],
     ));
+
+    level.with_children(|parent| {
+        // Spawn player
+        parent.spawn(player(400.0, &player_assets, &mut texture_atlas_layouts));
+        
+        // Spawn AI entities using configuration
+        for (i, position) in ai_config.positions.iter().enumerate() {
+            parent.spawn(spawn_ai_bundle(
+                ai_config.max_speed,
+                &ai_assets,
+                *position,
+            )).insert(Name::new(format!("AI Entity {}", i + 1)));
+        }
+        
+        // Spawn music
+        parent.spawn((
+            Name::new("Gameplay Music"),
+            music(level_assets.music.clone())
+        ));
+    });
 }
