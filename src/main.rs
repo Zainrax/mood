@@ -13,6 +13,7 @@ mod screens;
 mod theme;
 
 use bevy::{asset::AssetMetaCheck, prelude::*};
+use bevy_vello::{VelloPlugin, prelude::*};
 
 fn main() -> AppExit {
     App::new().add_plugins(AppPlugin).run()
@@ -45,6 +46,7 @@ impl Plugin for AppPlugin {
 
         // Add other plugins.
         app.add_plugins((
+            VelloPlugin::default(),
             asset_tracking::plugin,
             audio::plugin,
             demo::plugin,
@@ -98,5 +100,5 @@ struct Pause(pub bool);
 struct PausableSystems;
 
 fn spawn_camera(mut commands: Commands) {
-    commands.spawn((Name::new("Camera"), Camera2d));
+    commands.spawn((Name::new("Camera"), Camera2d, VelloView));
 }

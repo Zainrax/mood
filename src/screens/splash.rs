@@ -1,12 +1,9 @@
 //! A splash screen that plays briefly at startup.
 
-use bevy::{
-    image::{ImageLoaderSettings, ImageSampler},
-    input::common_conditions::input_just_pressed,
-    prelude::*,
-};
+use bevy::{input::common_conditions::input_just_pressed, prelude::*};
+use bevy_vello::prelude::*;
 
-use crate::{AppSystems, screens::Screen, theme::prelude::*};
+use crate::{AppSystems, screens::Screen};
 
 pub(super) fn plugin(app: &mut App) {
     // Spawn splash screen.
@@ -44,44 +41,27 @@ pub(super) fn plugin(app: &mut App) {
     );
 }
 
-const SPLASH_BACKGROUND_COLOR: Color = Color::srgb(0.157, 0.157, 0.157);
+const SPLASH_BACKGROUND_COLOR: Color = Color::srgb(1.0, 1.0, 1.0);
 const SPLASH_DURATION_SECS: f32 = 1.8;
 const SPLASH_FADE_DURATION_SECS: f32 = 0.6;
 
 fn spawn_splash_screen(mut commands: Commands, asset_server: Res<AssetServer>) {
+    // Spawn SVG splash screen
     commands.spawn((
-        widget::ui_root("Splash Screen"),
-        BackgroundColor(SPLASH_BACKGROUND_COLOR),
+        VelloSvgHandle(asset_server.load("images/Mood Title.svg")),
+        Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
+        SvgFadeInOut {
+            total_duration: SPLASH_DURATION_SECS,
+            fade_duration: SPLASH_FADE_DURATION_SECS,
+            t: 0.0,
+        },
         StateScoped(Screen::Splash),
-        children![(
-            Name::new("Splash image"),
-            Node {
-                margin: UiRect::all(Val::Auto),
-                width: Val::Percent(70.0),
-                ..default()
-            },
-            ImageNode::new(asset_server.load_with_settings(
-                // This should be an embedded asset for instant loading, but that is
-                // currently [broken on Windows Wasm builds](https://github.com/bevyengine/bevy/issues/14246).
-                "images/splash.png",
-                |settings: &mut ImageLoaderSettings| {
-                    // Make an exception for the splash image in case
-                    // `ImagePlugin::default_nearest()` is used for pixel art.
-                    settings.sampler = ImageSampler::linear();
-                },
-            )),
-            ImageNodeFadeInOut {
-                total_duration: SPLASH_DURATION_SECS,
-                fade_duration: SPLASH_FADE_DURATION_SECS,
-                t: 0.0,
-            },
-        )],
     ));
 }
 
 #[derive(Component, Reflect)]
 #[reflect(Component)]
-struct ImageNodeFadeInOut {
+struct SvgFadeInOut {
     /// Total duration in seconds.
     total_duration: f32,
     /// Fade duration in seconds.
@@ -90,7 +70,7 @@ struct ImageNodeFadeInOut {
     t: f32,
 }
 
-impl ImageNodeFadeInOut {
+impl SvgFadeInOut {
     fn alpha(&self) -> f32 {
         // Normalize by duration.
         let t = (self.t / self.total_duration).clamp(0.0, 1.0);
@@ -101,15 +81,17 @@ impl ImageNodeFadeInOut {
     }
 }
 
-fn tick_fade_in_out(time: Res<Time>, mut animation_query: Query<&mut ImageNodeFadeInOut>) {
+fn tick_fade_in_out(time: Res<Time>, mut animation_query: Query<&mut SvgFadeInOut>) {
     for mut anim in &mut animation_query {
         anim.t += time.delta_secs();
     }
 }
 
-fn apply_fade_in_out(mut animation_query: Query<(&ImageNodeFadeInOut, &mut ImageNode)>) {
-    for (anim, mut image) in &mut animation_query {
-        image.color.set_alpha(anim.alpha())
+fn apply_fade_in_out(mut animation_query: Query<(&SvgFadeInOut, &VelloSvgHandle)>, mut assets: ResMut<Assets<VelloSvg>>) {
+    for (anim, svg_handle) in &mut animation_query {
+        if let Some(svg) = assets.get_mut(svg_handle.id()) {
+            svg.alpha = anim.alpha();
+        }
     }
 }
 
