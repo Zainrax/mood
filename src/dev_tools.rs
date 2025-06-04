@@ -4,6 +4,7 @@ use bevy::{
     dev_tools::states::log_transitions, input::common_conditions::input_just_pressed, prelude::*,
     ui::UiDebugOptions,
 };
+use avian2d::prelude::*;
 
 use crate::screens::Screen;
 
@@ -16,6 +17,9 @@ pub(super) fn plugin(app: &mut App) {
         Update,
         toggle_debug_ui.run_if(input_just_pressed(TOGGLE_KEY)),
     );
+
+    // Add physics debug plugin
+    app.add_plugins(PhysicsDebugPlugin::default());
 }
 
 const TOGGLE_KEY: KeyCode = KeyCode::Backquote;

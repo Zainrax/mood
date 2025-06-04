@@ -6,8 +6,9 @@ use crate::{
     asset_tracking::LoadResource,
     audio::music,
     demo::{
-        ai::{spawn_ai_bundle, AiAssets, AiSpawnConfig},
-        player::{PlayerAssets, player},
+        ai::AiSpawnConfig,
+        mood::{spawn_moodel_bundle, Mood, MoodAssets},
+        player::player,
     },
     screens::Screen,
 };
@@ -37,20 +38,13 @@ impl FromWorld for LevelAssets {
 pub fn spawn_level(
     mut commands: Commands,
     level_assets: Res<LevelAssets>,
-    player_assets: Res<PlayerAssets>,
-    mut ai_assets: ResMut<AiAssets>,
-    mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
+    mood_assets: Res<MoodAssets>,
 ) {
-    // Initialize AI assets to use the same sprite as player for now
-    // In a real game, you'd load a different sprite for AI entities
-    if ai_assets.sprite.is_weak() {
-        ai_assets.sprite = player_assets.moodel.clone();
-    }
+    
+    // Get spawn configuration
+    let spawn_config = AiSpawnConfig::default();
 
-    // Get AI spawn configuration
-    let ai_config = AiSpawnConfig::default();
-
-    // Spawn the level entity with player and AI entities
+    // Spawn the level entity with player and Moodel entities
     let mut level = commands.spawn((
         Name::new("Level"),
         Transform::default(),
@@ -59,16 +53,17 @@ pub fn spawn_level(
     ));
 
     level.with_children(|parent| {
-        // Spawn player
-        parent.spawn(player(400.0, &player_assets, &mut texture_atlas_layouts));
+        // Spawn player (now just a marker entity)
+        parent.spawn(player());
         
-        // Spawn AI entities using configuration
-        for (i, position) in ai_config.positions.iter().enumerate() {
-            parent.spawn(spawn_ai_bundle(
-                ai_config.max_speed,
-                &ai_assets,
+        // Spawn Moodels starting in Neutral mood
+        for (i, position) in spawn_config.positions.iter().enumerate() {
+            parent.spawn(spawn_moodel_bundle(
+                Mood::Neutral,
+                &mood_assets,
                 *position,
-            )).insert(Name::new(format!("AI Entity {}", i + 1)));
+                spawn_config.max_speed,
+            )).insert(Name::new(format!("Neutral Moodel {}", i + 1)));
         }
         
         // Spawn music

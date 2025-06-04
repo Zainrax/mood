@@ -1,7 +1,6 @@
 //! A splash screen that plays briefly at startup.
 
 use bevy::{input::common_conditions::input_just_pressed, prelude::*};
-use bevy_vello::prelude::*;
 
 use crate::{AppSystems, screens::Screen};
 
@@ -46,11 +45,15 @@ const SPLASH_DURATION_SECS: f32 = 1.8;
 const SPLASH_FADE_DURATION_SECS: f32 = 0.6;
 
 fn spawn_splash_screen(mut commands: Commands, asset_server: Res<AssetServer>) {
-    // Spawn SVG splash screen
+    // Spawn PNG splash screen
     commands.spawn((
-        VelloSvgHandle(asset_server.load("images/Mood Title.svg")),
+        Sprite {
+            image: asset_server.load("images/Mood title.png"),
+            color: Color::srgba(1.0, 1.0, 1.0, 0.0), // Start fully transparent
+            ..default()
+        },
         Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
-        SvgFadeInOut {
+        SpriteFadeInOut {
             total_duration: SPLASH_DURATION_SECS,
             fade_duration: SPLASH_FADE_DURATION_SECS,
             t: 0.0,
@@ -61,7 +64,7 @@ fn spawn_splash_screen(mut commands: Commands, asset_server: Res<AssetServer>) {
 
 #[derive(Component, Reflect)]
 #[reflect(Component)]
-struct SvgFadeInOut {
+struct SpriteFadeInOut {
     /// Total duration in seconds.
     total_duration: f32,
     /// Fade duration in seconds.
@@ -70,7 +73,7 @@ struct SvgFadeInOut {
     t: f32,
 }
 
-impl SvgFadeInOut {
+impl SpriteFadeInOut {
     fn alpha(&self) -> f32 {
         // Normalize by duration.
         let t = (self.t / self.total_duration).clamp(0.0, 1.0);
@@ -81,17 +84,16 @@ impl SvgFadeInOut {
     }
 }
 
-fn tick_fade_in_out(time: Res<Time>, mut animation_query: Query<&mut SvgFadeInOut>) {
+fn tick_fade_in_out(time: Res<Time>, mut animation_query: Query<&mut SpriteFadeInOut>) {
     for mut anim in &mut animation_query {
         anim.t += time.delta_secs();
     }
 }
 
-fn apply_fade_in_out(mut animation_query: Query<(&SvgFadeInOut, &VelloSvgHandle)>, mut assets: ResMut<Assets<VelloSvg>>) {
-    for (anim, svg_handle) in &mut animation_query {
-        if let Some(svg) = assets.get_mut(svg_handle.id()) {
-            svg.alpha = anim.alpha();
-        }
+fn apply_fade_in_out(mut animation_query: Query<(&SpriteFadeInOut, &mut Sprite)>) {
+    for (anim, mut sprite) in &mut animation_query {
+        let alpha = anim.alpha();
+        sprite.color = sprite.color.with_alpha(alpha);
     }
 }
 

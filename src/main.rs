@@ -13,7 +13,7 @@ mod screens;
 mod theme;
 
 use bevy::{asset::AssetMetaCheck, prelude::*};
-use bevy_vello::{VelloPlugin, prelude::*};
+use avian2d::prelude::*;
 
 fn main() -> AppExit {
     App::new().add_plugins(AppPlugin).run()
@@ -44,9 +44,11 @@ impl Plugin for AppPlugin {
                 }),
         );
 
+        // Add Avian2D physics plugin
+        app.add_plugins(PhysicsPlugins::default().with_length_unit(100.0));
+
         // Add other plugins.
         app.add_plugins((
-            VelloPlugin::default(),
             asset_tracking::plugin,
             audio::plugin,
             demo::plugin,
@@ -100,5 +102,5 @@ struct Pause(pub bool);
 struct PausableSystems;
 
 fn spawn_camera(mut commands: Commands) {
-    commands.spawn((Name::new("Camera"), Camera2d, VelloView));
+    commands.spawn((Name::new("Camera"), Camera2d));
 }

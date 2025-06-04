@@ -14,6 +14,7 @@
 //! consider using a [fixed timestep](https://github.com/bevyengine/bevy/blob/main/examples/movement/physics_in_fixed_timestep.rs).
 
 use bevy::{prelude::*, window::PrimaryWindow};
+use avian2d::prelude::*;
 
 use crate::{AppSystems, PausableSystems};
 
@@ -55,12 +56,11 @@ impl Default for MovementController {
 }
 
 fn apply_movement(
-    time: Res<Time>,
-    mut movement_query: Query<(&MovementController, &mut Transform)>,
+    mut movement_query: Query<(&MovementController, &mut LinearVelocity)>,
 ) {
-    for (controller, mut transform) in &mut movement_query {
-        let velocity = controller.max_speed * controller.intent;
-        transform.translation += velocity.extend(0.0) * time.delta_secs();
+    for (controller, mut velocity) in &mut movement_query {
+        // Set velocity based on movement intent
+        velocity.0 = controller.max_speed * controller.intent;
     }
 }
 

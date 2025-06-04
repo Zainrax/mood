@@ -1,12 +1,10 @@
 //! Player-specific behavior.
 
 use bevy::prelude::*;
-use bevy_vello::prelude::*;
 
 use crate::{
     AppSystems, PausableSystems,
     asset_tracking::LoadResource,
-    demo::movement::{MovementController, ScreenWrap},
 };
 
 pub(super) fn plugin(app: &mut App) {
@@ -15,31 +13,24 @@ pub(super) fn plugin(app: &mut App) {
     app.register_type::<PlayerAssets>();
     app.load_resource::<PlayerAssets>();
 
-    // Record directional input as movement controls.
+    // Shape tool input systems
     app.add_systems(
         Update,
-        record_player_directional_input
+        (
+            handle_line_tool_input,
+            handle_box_tool_input,
+            handle_circle_tool_input,
+        )
             .in_set(AppSystems::RecordInput)
             .in_set(PausableSystems),
     );
 }
 
-/// The player character.
-pub fn player(
-    max_speed: f32,
-    player_assets: &PlayerAssets,
-    _texture_atlas_layouts: &mut Assets<TextureAtlasLayout>,
-) -> impl Bundle {
+/// The player marker (no longer a visual entity).
+pub fn player() -> impl Bundle {
     (
         Name::new("Player"),
         Player,
-        VelloSvgHandle(player_assets.moodel.clone()),
-        Transform::from_scale(Vec2::splat(0.5).extend(1.0)),
-        MovementController {
-            max_speed,
-            ..default()
-        },
-        ScreenWrap,
     )
 }
 
@@ -47,32 +38,33 @@ pub fn player(
 #[reflect(Component)]
 struct Player;
 
-fn record_player_directional_input(
+/// Handle Line Tool input (Q key)
+fn handle_line_tool_input(
     input: Res<ButtonInput<KeyCode>>,
-    mut controller_query: Query<&mut MovementController, With<Player>>,
 ) {
-    // Collect directional input.
-    let mut intent = Vec2::ZERO;
-    if input.pressed(KeyCode::KeyW) || input.pressed(KeyCode::ArrowUp) {
-        intent.y += 1.0;
+    if input.just_pressed(KeyCode::KeyQ) {
+        // TODO: Implement line tool
+        info!("Line tool activated!");
     }
-    if input.pressed(KeyCode::KeyS) || input.pressed(KeyCode::ArrowDown) {
-        intent.y -= 1.0;
-    }
-    if input.pressed(KeyCode::KeyA) || input.pressed(KeyCode::ArrowLeft) {
-        intent.x -= 1.0;
-    }
-    if input.pressed(KeyCode::KeyD) || input.pressed(KeyCode::ArrowRight) {
-        intent.x += 1.0;
-    }
+}
 
-    // Normalize intent so that diagonal movement is the same speed as horizontal / vertical.
-    // This should be omitted if the input comes from an analog stick instead.
-    let intent = intent.normalize_or_zero();
+/// Handle Box Tool input (W key)
+fn handle_box_tool_input(
+    input: Res<ButtonInput<KeyCode>>,
+) {
+    if input.just_pressed(KeyCode::KeyW) {
+        // TODO: Implement box tool
+        info!("Box tool activated!");
+    }
+}
 
-    // Apply movement intent to controllers.
-    for mut controller in &mut controller_query {
-        controller.intent = intent;
+/// Handle Circle Tool input (E key)
+fn handle_circle_tool_input(
+    input: Res<ButtonInput<KeyCode>>,
+) {
+    if input.just_pressed(KeyCode::KeyE) {
+        // TODO: Implement circle tool
+        info!("Circle tool activated!");
     }
 }
 
@@ -80,7 +72,7 @@ fn record_player_directional_input(
 #[reflect(Resource)]
 pub struct PlayerAssets {
     #[dependency]
-    pub moodel: Handle<VelloSvg>,
+    pub moodel: Handle<Image>,
     #[dependency]
     pub steps: Vec<Handle<AudioSource>>,
 }
@@ -89,7 +81,7 @@ impl FromWorld for PlayerAssets {
     fn from_world(world: &mut World) -> Self {
         let assets = world.resource::<AssetServer>();
         Self {
-            moodel: assets.load("images/Moodel.svg"),
+            moodel: assets.load("images/Moodel.png"),
             steps: vec![
                 assets.load("audio/sound_effects/step1.ogg"),
                 assets.load("audio/sound_effects/step2.ogg"),

@@ -1,15 +1,28 @@
 {
   "mcpServers": {
-    "mcp-language-server": {
-      "type": "stdio",
-      "command": "mcp-language-server",
+    "tree_sitter": {
+      "command": "uv",
       "args": [
-        "--workspace",
-        "./",
-        "--lsp",
-        "rust-analyzer"
-      ],
-      "env": {}
+        "--directory",
+        "/mnt/9c435c54-4e2d-4e28-8945-b5b7ea0c5ac2/code/mood",
+        "run",
+        "-m",
+        "mcp_server_tree_sitter.server"
+      ]
+    },
+    "rust-docs-bevy": {
+      "command": "rustdocs_mcp_server",
+      "args": ["bevy@0.16", "-F", "wayland"],
+      "env": {
+        "OLLAMA_HOST": "localhost:11434"
+      }
+    },
+    "rust-docs-avian2d": {
+      "command": "rustdocs_mcp_server",
+      "args": ["avian2d@0.3"],
+      "env": {
+        "OLLAMA_HOST": "localhost:11434"
+      }
     }
   }
 }
