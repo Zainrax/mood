@@ -9,7 +9,7 @@ use rand::Rng;
 
 use crate::{
     AppSystems, PausableSystems,
-    demo::movement::{MovementController, ScreenWrap},
+    demo::movement::MovementController,
 };
 
 /// Configuration constants for AI behavior
@@ -54,6 +54,8 @@ pub struct AiAssets {
 /// * `ai_assets` - Assets resource containing AI sprites
 /// * `position` - Initial world position of the entity
 pub fn spawn_ai_bundle(max_speed: f32, ai_assets: &AiAssets, position: Vec3) -> impl Bundle {
+    use crate::demo::movement::{PlayAreaBounded, MovementSmoothing};
+    
     (
         Name::new("AI Entity"),
         AiEntity,
@@ -68,7 +70,8 @@ pub fn spawn_ai_bundle(max_speed: f32, ai_assets: &AiAssets, position: Vec3) -> 
             max_speed,
             ..default()
         },
-        ScreenWrap,
+        PlayAreaBounded::default(),
+        MovementSmoothing::default(),
     )
 }
 
@@ -87,11 +90,23 @@ impl Default for AiSpawnConfig {
     fn default() -> Self {
         Self {
             positions: vec![
+                // Original positions
                 Vec3::new(-200.0, 100.0, 0.0),
                 Vec3::new(200.0, -100.0, 0.0),
                 Vec3::new(0.0, 200.0, 0.0),
                 Vec3::new(-150.0, -150.0, 0.0),
                 Vec3::new(300.0, 0.0, 0.0),
+                // Additional positions for more interactions
+                Vec3::new(-100.0, 0.0, 0.0),
+                Vec3::new(100.0, 150.0, 0.0),
+                Vec3::new(-250.0, -50.0, 0.0),
+                Vec3::new(250.0, 100.0, 0.0),
+                Vec3::new(0.0, -200.0, 0.0),
+                Vec3::new(-350.0, 0.0, 0.0),
+                Vec3::new(350.0, -50.0, 0.0),
+                Vec3::new(-50.0, 250.0, 0.0),
+                Vec3::new(50.0, -250.0, 0.0),
+                Vec3::new(150.0, 50.0, 0.0),
             ],
             max_speed: config::DEFAULT_AI_SPEED,
         }

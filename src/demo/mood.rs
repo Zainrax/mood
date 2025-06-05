@@ -1,22 +1,30 @@
 //! Mood system for Moodels - defines different emotional states and conversion logic.
 
+use avian2d::prelude::*;
 use bevy::prelude::*;
 use rand::Rng;
-use avian2d::prelude::*;
+use std::collections::HashMap;
 
+use crate::demo::ai::{AiEntity, AiWanderState};
+use crate::demo::movement::{MovementController, MovementSmoothing, PlayAreaBounded};
 use crate::{AppSystems, PausableSystems, asset_tracking::LoadResource};
 
 pub(super) fn plugin(app: &mut App) {
     app.register_type::<Mood>();
     app.register_type::<MoodAssets>();
+    app.register_type::<MoodObject>();
     app.load_resource::<MoodAssets>();
+    app.init_resource::<MoodStatsTimer>();
 
     // Mood conversion systems
     app.add_systems(
         Update,
         (
-            update_mood_based_on_collisions,
-            update_mood_natural_progression,
+            handle_collision_events,
+            handle_mood_object_collisions,
+            handle_isolation_decay,
+            log_mood_statistics,
+            // update_mood_natural_progression, // Disabled cyclical progression
         )
             .in_set(AppSystems::Update)
             .in_set(PausableSystems),
@@ -57,34 +65,6 @@ impl Mood {
         }
     }
 
-    /// Get all mood variants for iteration
-    pub fn all() -> [Mood; 5] {
-        [
-            Mood::Neutral,
-            Mood::Calm,
-            Mood::Happy,
-            Mood::Rage,
-            Mood::Sad,
-        ]
-    }
-
-    /// Get the next mood in the cyclical progression: Happy -> Calm -> Sad -> Rage -> Happy
-    /// Neutral can transition to any mood based on external factors
-    pub fn next_in_cycle(self) -> Mood {
-        match self {
-            Mood::Neutral => Mood::Happy, // Neutral naturally progresses to Happy
-            Mood::Happy => Mood::Calm,
-            Mood::Calm => Mood::Sad,
-            Mood::Sad => Mood::Rage,
-            Mood::Rage => Mood::Happy,
-        }
-    }
-
-    /// Get a random mood
-    pub fn random(rng: &mut impl Rng) -> Self {
-        let moods = Self::all();
-        moods[rng.random_range(0..moods.len())]
-    }
 }
 
 /// Resource containing all mood-related assets
@@ -133,112 +113,390 @@ impl FromWorld for MoodAssets {
 #[derive(Component, Debug, Clone, Reflect)]
 #[reflect(Component)]
 pub struct MoodEntity {
-    /// Current collision count
-    pub collision_count: usize,
-    /// Timer until next collision-based mood evaluation
-    pub next_mood_check: Timer,
-    /// Timer for natural cyclical mood progression
-    pub next_cycle_progression: Timer,
+    /// Timer for checking isolation decay
+    pub isolation_timer: Timer,
     /// How long the current mood has been stable (for permanence)
     pub mood_stability: f32,
+    /// Last time this entity had a social interaction
+    pub last_interaction_time: f32,
 }
 
 impl Default for MoodEntity {
     fn default() -> Self {
         Self {
-            collision_count: 0,
-            next_mood_check: Timer::from_seconds(0.5, TimerMode::Repeating), // Check every 0.5 seconds as per spec
-            next_cycle_progression: Timer::from_seconds(8.0, TimerMode::Repeating), // Natural mood cycle every 8 seconds
+            isolation_timer: Timer::from_seconds(3.0, TimerMode::Repeating), // Check for isolation every 3 seconds
             mood_stability: 0.0,
+            last_interaction_time: 0.0, // Will be set to current time when entity spawns
         }
     }
 }
 
-/// Updates Moodel moods based on collision count
-fn update_mood_based_on_collisions(
-    time: Res<Time>,
-    mood_assets: Option<Res<MoodAssets>>,
-    mut moodel_query: Query<(Entity, &mut Mood, &mut MoodEntity, &mut Sprite, &CollidingEntities)>,
+/// Resource for tracking mood statistics logging
+#[derive(Resource)]
+pub struct MoodStatsTimer {
+    timer: Timer,
+}
+
+impl Default for MoodStatsTimer {
+    fn default() -> Self {
+        Self {
+            timer: Timer::from_seconds(5.0, TimerMode::Repeating), // Log every 5 seconds
+        }
+    }
+}
+
+/// Determines how two moods interact when they collide
+fn get_mood_interaction(mood1: Mood, mood2: Mood) -> (Mood, Mood) {
+    use Mood::*;
+    // rand::Rng is already in scope from the top of the file via `use rand::Rng;`
+
+    match (mood1, mood2) {
+        // Rage interactions (Target: 15% Rage) - Tuned to be less overwhelming
+        (Rage, Sad) | (Sad, Rage) => (Rage, Sad),      // Rage persists, Sad persists (was Rage, Rage)
+        (Rage, Calm) | (Calm, Rage) => (Sad, Calm),     // Rage becomes Sad, Calm persists (was Rage, Sad)
+        (Rage, Happy) | (Happy, Rage) => (Sad, Happy),    // Rage becomes Sad, Happy persists (was Rage, Sad)
+        (Rage, Neutral) | (Neutral, Rage) => (Rage, Sad),  // Rage converts Neutral to Sad, Rage remains
+        (Rage, Rage) => (Rage, Rage),                     // Rage reinforces Rage
+
+        // Happy interactions (Target: 35% Happy)
+        (Happy, Sad) | (Sad, Happy) => (Happy, Calm),   // Happy cheers Sad to Calm
+        (Happy, Calm) | (Calm, Happy) => (Happy, Happy), // Happy spreads to Calm
+        (Happy, Neutral) | (Neutral, Happy) => (Happy, Calm), // Happy lifts Neutral to Calm
+        (Happy, Happy) => (Happy, Happy),                 // Happiness reinforces
+
+        // Calm interactions (Target: 35% Calm)
+        // Note: Calm interactions with Rage/Happy are covered above.
+        (Calm, Sad) | (Sad, Calm) => (Calm, Calm),     // Calm comforts Sad
+        (Calm, Neutral) | (Neutral, Calm) => (Calm, Calm), // Calm influences Neutral
+        (Calm, Calm) => (Calm, Calm),                    // Calm maintains
+
+        // Sad interactions (Target: 15% Sad)
+        // Note: Sad interactions with Rage/Happy/Calm are covered above.
+        (Sad, Neutral) | (Neutral, Sad) => (Sad, Sad),   // Sad spreads to Neutral
+        (Sad, Sad) => (Sad, Sad),                        // Sadness reinforces
+
+        // Neutral interactions - Aiming for 15%S, 15%R, 35%H, 35%C
+        (Neutral, Neutral) => {
+            let mut rng = rand::thread_rng(); // More idiomatic to use thread_rng for one-off uses
+            match rng.gen_range(0..100u8) { // Use u8 for small range, and 0..100 for percentages
+                r if r < 15 => (Sad, Sad),       // 15% Sad + Sad
+                r if r < 30 => (Rage, Rage),      // 15% Rage + Rage (cumulative 15% + 15% = 30%)
+                r if r < 65 => (Happy, Happy),    // 35% Happy + Happy (cumulative 30% + 35% = 65%)
+                _           => (Calm, Calm),       // 35% Calm + Calm (remaining 35%)
+            }
+        },
+    }
+}
+
+/// Updates mood for a single entity
+fn update_entity_mood(
+    entity: Entity,
+    mood: &mut Mood,
+    mood_entity: &mut MoodEntity,
+    sprite: &mut Sprite,
+    mood_assets: &MoodAssets,
+    new_mood: Mood,
 ) {
+    if new_mood != *mood {
+        *mood = new_mood;
+        sprite.image = mood_assets.get_sprite(new_mood);
+        sprite.color = new_mood.color();
+        mood_entity.mood_stability = 0.0; // Reset stability on change
+        
+        #[cfg(feature = "dev")]
+        info!(
+            "Entity {:?} mood changed to {:?} through interaction",
+            entity, new_mood
+        );
+    }
+}
+
+/// Handle collision events for mood-based social interactions
+fn handle_collision_events(
+    mut collision_started: EventReader<CollisionStarted>,
+    mut moodel_query: Query<(&mut Mood, &mut MoodEntity, &mut Sprite), With<AiEntity>>,
+    ai_query: Query<(), With<AiEntity>>,
+    mood_assets: Option<Res<MoodAssets>>,
+    time: Res<Time>,
+) -> Result {
     // Early return if assets aren't loaded yet
     let Some(mood_assets) = mood_assets else {
-        return;
+        return Ok(());
     };
 
-    let mut conversions = Vec::new();
+    let current_time = time.elapsed_secs();
 
-    // Process each Moodel for mood changes based on collisions
-    for (entity, current_mood, mut mood_entity, _sprite, colliding_entities) in &mut moodel_query {
-        // Update collision count
-        mood_entity.collision_count = colliding_entities.len();
-        
-        // Update timer
-        mood_entity.next_mood_check.tick(time.delta());
-        
-        // Check for mood change based on collision count
-        if mood_entity.next_mood_check.just_finished() && mood_entity.mood_stability < 3.0 {
-            let collision_mood = match mood_entity.collision_count {
-                0 => Mood::Sad,       // Isolated → Sad (loneliness)
-                1..=2 => Mood::Calm,  // Small groups (2-3) → Calm (comfortable)
-                3..=5 => Mood::Happy, // Medium groups (4-6) → Happy (social energy)
-                _ => Mood::Rage,      // Large crowds (7+) → Rage (overwhelmed)
-            };
-
-            // Only change if collision mood is different and significant
-            if collision_mood != *current_mood && mood_entity.mood_stability < 1.5 {
-                conversions.push((entity, collision_mood));
+    // Handle collision started events - this is where social interactions happen
+    for CollisionStarted(entity1, entity2) in collision_started.read() {
+        // Only handle collisions between Moodels (both entities have AiEntity)
+        if ai_query.contains(*entity1) && ai_query.contains(*entity2) {
+            // Get both entities' moods to determine interaction
+            let mood1 = moodel_query.get(*entity1).map(|(m, _, _)| *m).ok();
+            let mood2 = moodel_query.get(*entity2).map(|(m, _, _)| *m).ok();
+            
+            if let (Some(mood1), Some(mood2)) = (mood1, mood2) {
+                // Calculate the mood interaction result
+                let (new_mood1, new_mood2) = get_mood_interaction(mood1, mood2);
+                
+                #[cfg(feature = "dev")]
                 info!(
-                    "Collision change: {:?} -> {:?} (collisions: {})",
-                    current_mood, collision_mood, mood_entity.collision_count
+                    "Mood interaction: {:?} + {:?} → {:?} + {:?}",
+                    mood1, mood2, new_mood1, new_mood2
                 );
+                
+                // Apply mood changes to both entities
+                if let Ok((mut mood, mut mood_entity, mut sprite)) = moodel_query.get_mut(*entity1) {
+                    mood_entity.last_interaction_time = current_time;
+                    update_entity_mood(
+                        *entity1,
+                        &mut mood,
+                        &mut mood_entity,
+                        &mut sprite,
+                        &mood_assets,
+                        new_mood1,
+                    );
+                }
+                
+                if let Ok((mut mood, mut mood_entity, mut sprite)) = moodel_query.get_mut(*entity2) {
+                    mood_entity.last_interaction_time = current_time;
+                    update_entity_mood(
+                        *entity2,
+                        &mut mood,
+                        &mut mood_entity,
+                        &mut sprite,
+                        &mood_assets,
+                        new_mood2,
+                    );
+                }
             }
         }
     }
 
-    // Apply conversions
-    for (entity, new_mood) in conversions {
-        if let Ok((_, mut mood, mut mood_entity, mut sprite, _)) = moodel_query.get_mut(entity) {
-            *mood = new_mood;
-            sprite.image = mood_assets.get_sprite(new_mood);
-            sprite.color = new_mood.color();
+    Ok(())
+}
 
-            // Reset stability when mood changes
-            mood_entity.mood_stability = 0.0;
+/// Handle collisions between Moodels and mood-changing objects
+fn handle_mood_object_collisions(
+    mut collision_started: EventReader<CollisionStarted>,
+    mut moodel_query: Query<(&mut Mood, &mut MoodEntity, &mut Sprite), With<AiEntity>>,
+    mut mood_object_query: Query<&mut MoodObject>,
+    mood_assets: Option<Res<MoodAssets>>,
+    time: Res<Time>,
+) -> Result {
+    // Early return if assets aren't loaded yet
+    let Some(mood_assets) = mood_assets else {
+        return Ok(());
+    };
+
+    let current_time = time.elapsed_secs();
+
+    // Handle collision started events between Moodels and MoodObjects
+    for CollisionStarted(entity1, entity2) in collision_started.read() {
+        // Check if one entity is a Moodel and the other is a MoodObject
+        let moodel_entity;
+        let mood_object_entity;
+
+        if moodel_query.contains(*entity1) && mood_object_query.contains(*entity2) {
+            moodel_entity = *entity1;
+            mood_object_entity = *entity2;
+        } else if moodel_query.contains(*entity2) && mood_object_query.contains(*entity1) {
+            moodel_entity = *entity2;
+            mood_object_entity = *entity1;
+        } else {
+            continue; // Not a Moodel-MoodObject collision
         }
+
+        // Get the mood object and check cooldown
+        if let Ok(mut mood_object) = mood_object_query.get_mut(mood_object_entity) {
+            if mood_object.can_affect(moodel_entity, current_time) {
+                // Apply mood change to the Moodel
+                if let Ok((mut mood, mut mood_entity, mut sprite)) = moodel_query.get_mut(moodel_entity) {
+                    let target_mood = mood_object.target_mood;
+                    
+                    if *mood != target_mood {
+                        update_entity_mood(
+                            moodel_entity,
+                            &mut mood,
+                            &mut mood_entity,
+                            &mut sprite,
+                            &mood_assets,
+                            target_mood,
+                        );
+                        
+                        // Update interaction time and record hit
+                        mood_entity.last_interaction_time = current_time;
+                        mood_object.record_hit(moodel_entity, current_time);
+                        
+                        #[cfg(feature = "dev")]
+                        info!(
+                            "MoodObject collision: Entity {:?} changed to {:?} by mood object",
+                            moodel_entity, target_mood
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle isolation decay - Moodels become calm then neutral when isolated
+fn handle_isolation_decay(
+    time: Res<Time>,
+    mood_assets: Option<Res<MoodAssets>>,
+    mut moodel_query: Query<(Entity, &mut Mood, &mut MoodEntity, &mut Sprite), With<AiEntity>>,
+) -> Result {
+    // Early return if assets aren't loaded yet
+    let Some(mood_assets) = mood_assets else {
+        return Ok(());
+    };
+
+    let current_time = time.elapsed_secs();
+    let delta = time.delta_secs();
+
+    for (entity, mut mood, mut mood_entity, mut sprite) in &mut moodel_query {
+        mood_entity.isolation_timer.tick(time.delta());
+        mood_entity.mood_stability += delta; // Track how long mood has been stable
+        
+        // Check if entity has been isolated (no interactions for a while)
+        if mood_entity.isolation_timer.just_finished() {
+            let time_since_interaction = current_time - mood_entity.last_interaction_time;
+            
+            // If isolated for more than 3 seconds (matching spec), start mood decay toward neutral
+            if time_since_interaction > 3.0 { // Changed from 5.0 to 3.0
+                let new_mood = match *mood {
+                    Mood::Rage => Mood::Neutral,    // Rage cools to Neutral
+                    Mood::Happy => Mood::Neutral,   // Happiness fades to Neutral
+                    Mood::Sad => Mood::Neutral,  // Sadness lifts to Neutral
+                    Mood::Calm => Mood::Neutral, // Calm becomes Neutral
+                    Mood::Neutral => Mood::Neutral, // Already neutral
+                };
+                
+                if new_mood != *mood {
+                    update_entity_mood(
+                        entity,
+                        &mut mood,
+                        &mut mood_entity,
+                        &mut sprite,
+                        &mood_assets,
+                        new_mood,
+                    );
+                    
+                    #[cfg(feature = "dev")]
+                    info!("Entity {:?} isolated decay: {:?} -> {:?}", entity, *mood, new_mood);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// Cyclical progression system disabled - only isolation decay and social interactions now determine mood changes
+
+/// Log mood statistics every 5 seconds
+fn log_mood_statistics(
+    time: Res<Time>,
+    mut stats_timer: ResMut<MoodStatsTimer>,
+    moodel_query: Query<&Mood, With<AiEntity>>,
+) -> Result {
+    stats_timer.timer.tick(time.delta());
+    
+    if stats_timer.timer.just_finished() {
+        let mut mood_counts = [0; 5]; // [Neutral, Calm, Happy, Rage, Sad]
+        let mut total_count = 0;
+        
+        // Count each mood type
+        for mood in &moodel_query {
+            total_count += 1;
+            match *mood {
+                Mood::Neutral => mood_counts[0] += 1,
+                Mood::Calm => mood_counts[1] += 1,
+                Mood::Happy => mood_counts[2] += 1,
+                Mood::Rage => mood_counts[3] += 1,
+                Mood::Sad => mood_counts[4] += 1,
+            }
+        }
+        
+        if total_count > 0 {
+            // Calculate percentages
+            let neutral_pct = (mood_counts[0] as f32 / total_count as f32) * 100.0;
+            let calm_pct = (mood_counts[1] as f32 / total_count as f32) * 100.0;
+            let happy_pct = (mood_counts[2] as f32 / total_count as f32) * 100.0;
+            let rage_pct = (mood_counts[3] as f32 / total_count as f32) * 100.0;
+            let sad_pct = (mood_counts[4] as f32 / total_count as f32) * 100.0;
+            
+            info!(
+                "MOOD STATS | Total: {} | Neutral: {:.1}% | Calm: {:.1}% | Happy: {:.1}% | Rage: {:.1}% | Sad: {:.1}%",
+                total_count, neutral_pct, calm_pct, happy_pct, rage_pct, sad_pct
+            );
+        }
+    }
+    
+    Ok(())
+}
+
+/// Component for static objects that change mood when collided with
+#[derive(Component, Debug, Clone, Reflect)]
+#[reflect(Component)]
+pub struct MoodObject {
+    /// What mood this object triggers when hit
+    pub target_mood: Mood,
+    /// How long before this object can affect the same entity again (cooldown in seconds)
+    pub cooldown: f32,
+    /// Track which entities have recently been affected
+    pub recent_hits: HashMap<Entity, f32>,
+}
+
+impl MoodObject {
+    pub fn new(target_mood: Mood, cooldown: f32) -> Self {
+        Self {
+            target_mood,
+            cooldown,
+            recent_hits: HashMap::new(),
+        }
+    }
+    
+    /// Check if an entity can be affected by this object (cooldown expired)
+    pub fn can_affect(&self, entity: Entity, current_time: f32) -> bool {
+        if let Some(&last_hit_time) = self.recent_hits.get(&entity) {
+            current_time - last_hit_time >= self.cooldown
+        } else {
+            true // First time hitting this object
+        }
+    }
+    
+    /// Record that this entity was affected at the current time
+    pub fn record_hit(&mut self, entity: Entity, current_time: f32) {
+        self.recent_hits.insert(entity, current_time);
     }
 }
 
-/// Updates Moodel moods based on natural cyclical progression
-fn update_mood_natural_progression(
-    time: Res<Time>,
-    mood_assets: Option<Res<MoodAssets>>,
-    mut moodel_query: Query<(&mut Mood, &mut MoodEntity, &mut Sprite)>,
-) {
-    // Early return if assets aren't loaded yet
-    let Some(mood_assets) = mood_assets else {
-        return;
-    };
-
-    let delta = time.delta_secs();
-
-    for (mut mood, mut mood_entity, mut sprite) in &mut moodel_query {
-        // Update timers and stability
-        mood_entity.next_cycle_progression.tick(time.delta());
-        mood_entity.mood_stability += delta;
-
-        // Natural cyclical progression (overrides collision-based if mood is stable)
-        if mood_entity.next_cycle_progression.just_finished() {
-            let new_mood = mood.next_in_cycle();
-            info!("Cyclical progression: {:?} -> {:?}", *mood, new_mood);
-            
-            *mood = new_mood;
-            sprite.image = mood_assets.get_sprite(new_mood);
-            sprite.color = new_mood.color();
-            
-            // Reset stability when mood changes
-            mood_entity.mood_stability = 0.0;
-        }
-    }
+/// Bundle for a Moodel entity
+#[derive(Bundle)]
+pub struct MoodelBundle {
+    pub name: Name,
+    pub ai_entity: AiEntity,
+    pub mood: Mood,
+    pub mood_entity: MoodEntity,
+    pub ai_wander: AiWanderState,
+    pub sprite: Sprite,
+    pub transform: Transform,
+    pub movement_controller: MovementController,
+    pub play_area_bounded: PlayAreaBounded,
+    pub movement_smoothing: MovementSmoothing,
+    pub rigid_body: RigidBody,
+    pub collider: Collider,
+    pub linear_velocity: LinearVelocity,
+    pub angular_velocity: AngularVelocity,
+    pub collision_layers: CollisionLayers,
+    pub collision_events: CollisionEventsEnabled,
+    pub restitution: Restitution,
+    pub locked_axes: LockedAxes,
+    pub mass: Mass,
+    pub friction: Friction,
+    pub gravity_scale: GravityScale,
+    pub external_force: ExternalForce,
 }
 
 /// Creates a bundle for spawning a Moodel with a specific mood
@@ -247,33 +505,125 @@ pub fn spawn_moodel_bundle(
     mood_assets: &MoodAssets,
     position: Vec3,
     max_speed: f32,
-) -> impl Bundle {
-    use crate::demo::ai::{AiEntity, AiWanderState};
-    use crate::demo::movement::{MovementController, ScreenWrap};
-
-    (
-        Name::new(format!("{:?} Moodel", mood)),
-        AiEntity,
+    current_time: f32,
+) -> MoodelBundle {
+    MoodelBundle {
+        name: Name::new(format!("{:?} Moodel", mood)),
+        ai_entity: AiEntity,
         mood,
-        MoodEntity::default(),
-        AiWanderState::new(),
-        Sprite {
+        mood_entity: MoodEntity {
+            isolation_timer: Timer::from_seconds(3.0, TimerMode::Repeating),
+            mood_stability: 0.0,
+            last_interaction_time: current_time, // Initialize with current game time
+        },
+        ai_wander: AiWanderState::new(),
+        sprite: Sprite {
             image: mood_assets.get_sprite(mood),
             color: mood.color(),
             custom_size: Some(Vec2::new(134.0, 208.0)),
             ..default()
         },
-        Transform::from_translation(position).with_scale(Vec3::splat(0.5)),
-        MovementController {
+        transform: Transform::from_translation(position).with_scale(Vec3::splat(0.5)),
+        movement_controller: MovementController {
             max_speed: max_speed * mood.speed_multiplier(),
             ..default()
         },
-        ScreenWrap,
+        play_area_bounded: PlayAreaBounded {
+            restitution: match mood {
+                Mood::Happy => 0.9,  // Happy moodels bounce more
+                Mood::Rage => 0.7,   // Rage moodels have harder bounces
+                Mood::Sad => 0.3,    // Sad moodels barely bounce
+                _ => 0.6,            // Default bounce
+            },
+        },
+        locked_axes: LockedAxes::ROTATION_LOCKED, // Lock rotation for 2D top-down movement
+        movement_smoothing: MovementSmoothing {
+            acceleration: match mood {
+                Mood::Happy => 1000.0,  // Happy accelerates quickly
+                Mood::Rage => 1200.0,   // Rage accelerates very quickly
+                Mood::Calm => 400.0,    // Calm accelerates slowly
+                Mood::Sad => 300.0,     // Sad accelerates very slowly
+                _ => 600.0,
+            },
+            deceleration: match mood {
+                Mood::Rage => 800.0,    // Rage decelerates slowly (harder to stop)
+                Mood::Happy => 1200.0,  // Happy can stop quickly
+                Mood::Calm => 1000.0,   // Calm stops smoothly
+                Mood::Sad => 600.0,     // Sad takes time to stop
+                _ => 1000.0,
+            },
+            ..default()
+        },
         // Physics components
-        RigidBody::Dynamic,
-        Collider::circle(30.0), // Radius of 30 pixels for the Moodel
-        LinearVelocity::default(),
-        AngularVelocity::default(),
-        CollisionLayers::new([0], [0]), // All Moodels on same layer and collide with each other
+        rigid_body: RigidBody::Dynamic,
+        collider: Collider::circle(50.0), // Larger radius for better collision detection
+        linear_velocity: LinearVelocity::default(),
+        angular_velocity: AngularVelocity::default(),
+        collision_layers: CollisionLayers::default(), // Default collision layers
+        collision_events: CollisionEventsEnabled, // Enable collision events
+        restitution: Restitution::new(match mood {
+            Mood::Happy => 0.9,  // Happy moodels bounce more
+            Mood::Rage => 0.7,   // Rage moodels have harder bounces
+            Mood::Sad => 0.3,    // Sad moodels barely bounce
+            _ => 0.6,            // Default bounce
+        }),
+        mass: Mass(2.0), // Give Moodels more mass for better collision physics
+        friction: Friction::new(0.1), // Light friction so they don't stick together
+        gravity_scale: GravityScale(0.0), // No gravity for 2D top-down movement
+        external_force: ExternalForce::default(), // For applying movement forces
+    }
+}
+
+/// Creates a mood object bundle with specific shape and properties
+pub fn create_mood_object_bundle(
+    mood: Mood,
+    position: Vec3,
+    cooldown: f32,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<ColorMaterial>>,
+) -> impl Bundle {
+    let (mesh, color) = match mood {
+        Mood::Rage => {
+            // Red spiky triangle for rage
+            let triangle = Triangle2d::new(
+                Vec2::Y * 30.0,           // Top point
+                Vec2::new(-25.0, -20.0),  // Bottom left
+                Vec2::new(25.0, -20.0),   // Bottom right
+            );
+            (meshes.add(triangle), Color::srgb(0.9, 0.1, 0.1)) // Bright red
+        },
+        Mood::Sad => {
+            // Blue teardrop/circle for sadness
+            let circle = Circle::new(25.0);
+            (meshes.add(circle), Color::srgb(0.1, 0.3, 0.8)) // Deep blue
+        },
+        Mood::Happy => {
+            // Yellow star shape for happiness
+            let star = RegularPolygon::new(25.0, 5);
+            (meshes.add(star), Color::srgb(1.0, 0.9, 0.1)) // Bright yellow
+        },
+        Mood::Calm => {
+            // Green smooth circle for calm
+            let circle = Circle::new(20.0);
+            (meshes.add(circle), Color::srgb(0.2, 0.8, 0.3)) // Soft green
+        },
+        Mood::Neutral => {
+            // Gray square for neutral
+            let square = Rectangle::new(30.0, 30.0);
+            (meshes.add(square), Color::srgb(0.6, 0.6, 0.6)) // Gray
+        },
+    };
+
+    (
+        Name::new(format!("{:?} Mood Object", mood)),
+        MoodObject::new(mood, cooldown),
+        Mesh2d(mesh),
+        MeshMaterial2d(materials.add(color)),
+        Transform::from_translation(position),
+        // Physics components for collision detection
+        RigidBody::Static, // Static objects don't move
+        Collider::circle(30.0), // Slightly larger than visual for better collision
+        CollisionLayers::default(),
+        CollisionEventsEnabled,
     )
 }
