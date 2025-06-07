@@ -151,7 +151,7 @@ pub fn spawn_level(
 
         // Spawn mood objects around the play area
         let mood_objects = [
-            (Mood::Rage, Vec3::new(-300.0, 200.0, 0.0)), // Top left - red triangle
+        //  (Mood::Rage, Vec3::new(-300.0, 200.0, 0.0)), // Top left - red triangle
          //   (Mood::Sad, Vec3::new(300.0, 200.0, 0.0)),   // Top right - blue circle
          //   (Mood::Happy, Vec3::new(-300.0, -200.0, 0.0)), // Bottom left - yellow star
          //   (Mood::Calm, Vec3::new(300.0, -200.0, 0.0)), // Bottom right - green circle

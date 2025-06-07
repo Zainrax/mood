@@ -12,8 +12,11 @@ mod menus;
 mod screens;
 mod theme;
 
-use bevy::{asset::AssetMetaCheck, prelude::*};
 use avian2d::prelude::*;
+use bevy::{asset::AssetMetaCheck, prelude::*};
+use bevy_egui::EguiPlugin;
+#[cfg(feature = "dev")]
+use bevy_inspector_egui::quick::WorldInspectorPlugin;
 
 fn main() -> AppExit {
     App::new().add_plugins(AppPlugin).run()
@@ -54,6 +57,12 @@ impl Plugin for AppPlugin {
             demo::plugin,
             #[cfg(feature = "dev")]
             dev_tools::plugin,
+            #[cfg(feature = "dev")]
+            EguiPlugin {
+                enable_multipass_for_primary_context: true,
+            },
+            #[cfg(feature = "dev")]
+            WorldInspectorPlugin::new(),
             menus::plugin,
             screens::plugin,
             theme::plugin,

@@ -223,7 +223,7 @@ define_get_mood_interaction! {
         (Happy, Neutral) => (Happy, Calm), // Happy lifts Neutral to Calm.
 
         // Calm interactions
-        (Calm, Sad) => (Calm, Sad),     // Calm soothes Sad to Calm.
+        (Calm, Sad) => (Calm, Calm),     // Calm soothes Sad to Calm.
         (Calm, Neutral) => (Calm, Calm), // Calm influences Neutral.
 
         // Sad interactions
@@ -297,12 +297,12 @@ fn handle_collision_events(
     for CollisionStarted(entity1, entity2) in collision_started.read() {
         // Use a let-chain for clarity if your Rust version supports it,
         // otherwise nest the `if let`.
-        if let (Ok(moodel1), Ok(moodel2)) = (moodel_query.get(*entity1), moodel_query.get(*entity2))
+        if let (Ok(_moodel1), Ok(_moodel2)) =
+            (moodel_query.get(*entity1), moodel_query.get(*entity2))
         {
             // --- NEW: Handle Rage Burnout ---
             let mut process_burnout = |charger_entity: Entity, _target_entity: Entity| {
-                if let Ok((mut mood, _, _, mut wander_state)) = moodel_query.get_mut(charger_entity)
-                {
+                if let Ok((mood, _, _, mut wander_state)) = moodel_query.get_mut(charger_entity) {
                     if *mood == Mood::Rage
                         && matches!(wander_state.action, AiAction::Charging { .. })
                     {
@@ -474,10 +474,14 @@ fn handle_isolation_decay(
             if (time_since_interaction > 2.0 && *mood != Mood::Rage) || time_since_interaction > 6.0
             {
                 let new_mood = match *mood {
-                    Mood::Rage => Mood::Calm,    // Rage cools to Neutral
-                    Mood::Happy => Mood::Calm,   // Happiness fades to Neutral
-                    Mood::Sad => Mood::Neutral,  // Sadness lifts to Neutral
-                    Mood::Calm => Mood::Neutral, // Calm becomes Neutral
+                    Mood::Rage => Mood::Calm,   // Rage cools to Neutral
+                    Mood::Happy => Mood::Calm,  // Happiness fades to Neutral
+                    Mood::Sad => Mood::Neutral, // Sadness lifts to Neutral
+                    Mood::Calm => match rng.random_bool(1. / 2.) {
+                        // equal chance to change to be happy or neutral
+                        true => Mood::Happy,    // 50% chance to become Happy
+                        false => Mood::Neutral, // 50% chance to become Neutral
+                    },
                     Mood::Neutral => match rng.random_range(0..100u8) {
                         // equal chance to change to any mood
                         r if r < 20 => Mood::Happy, // 20% chance to become Happy
@@ -647,10 +651,10 @@ pub fn spawn_moodel_bundle(
             },
             play_area_bounded: PlayAreaBounded {
                 restitution: match mood {
-                    Mood::Happy => 0.9, // Happy moodels bounce more
-                    Mood::Rage => 0.7,  // Rage moodels have harder bounces
-                    Mood::Sad => 0.3,   // Sad moodels barely bounce
-                    _ => 0.6,           // Default bounce
+                    Mood::Happy => 0.2, // Happy moodels bounce more
+                    Mood::Rage => 0.2,  // Rage moodels have harder bounces
+                    Mood::Sad => 0.1,   // Sad moodels barely bounce
+                    _ => 0.1,           // Default bounce
                 },
             },
             locked_axes: LockedAxes::ROTATION_LOCKED, // Lock rotation for 2D top-down movement
@@ -694,8 +698,8 @@ pub fn spawn_moodel_bundle(
         AiMagnetism {
             vision_radius: 250.0,
             cohesion_strength: 0.05,
-            separation_strength: 0.5,
-            separation_distance: 80.0,
+            separation_strength: 0.1,
+            separation_distance: 20.0,
         },
     )
 }
