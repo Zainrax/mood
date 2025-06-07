@@ -8,6 +8,7 @@ edition = "2024"
 bevy = { version = "0.16", features = ["wayland"] }
 avian2d = "0.3"
 rand = "0.9"
+noisy_bevy = "0.10"
 # Compile low-severity logs out of native builds for performance.
 log = { version = "0.4", features = [
     "max_level_debug",
