@@ -89,7 +89,18 @@ pub(super) fn plugin(app: &mut App) {
 }
 
 /// The different emotional states a Moodel can have
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Component,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Reflect,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 #[reflect(Component)]
 pub enum Mood {
     Neutral,
@@ -120,6 +131,12 @@ impl Mood {
             Mood::Rage => Color::srgb(1.0, 0.2, 0.2),    // Red
             Mood::Sad => Color::srgb(0.6, 0.4, 0.8),     // Purple
         }
+    }
+}
+
+impl Default for Mood {
+    fn default() -> Self {
+        Mood::Neutral // Default mood is Neutral
     }
 }
 

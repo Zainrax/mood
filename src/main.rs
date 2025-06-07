@@ -87,8 +87,8 @@ impl Plugin for AppPlugin {
         app.init_state::<Pause>();
         app.configure_sets(Update, PausableSystems.run_if(in_state(Pause(false))));
 
-        // Spawn the main camera.
-        app.add_systems(Startup, spawn_camera);
+        // Spawn the main camera and setup assets.
+        app.add_systems(Startup, (spawn_camera, setup_assets));
     }
 }
 
@@ -116,4 +116,13 @@ struct PausableSystems;
 
 fn spawn_camera(mut commands: Commands) {
     commands.spawn((Name::new("Camera"), Camera2d));
+}
+
+fn setup_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
+    // Load a handwriting-style font
+    // You can download fonts like "Kalam-Bold.ttf" from Google Fonts
+    // or "ComicNeue-Bold.ttf" for a rounded, friendly look
+    let font = asset_server.load("fonts/ComicNeue-Bold.ttf");
+    // Fallback to default if font not found
+    commands.insert_resource(crate::demo::level::FontHandle(font));
 }
