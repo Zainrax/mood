@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use rand::Rng;
 use std::collections::HashMap;
 
-use crate::demo::ai::{AiEntity, AiWanderState, AiMagnetism};
+use crate::demo::ai::{AiAction, AiConfig, AiEntity, AiMagnetism, AiWanderState};
 use crate::demo::movement::{MovementController, MovementSmoothing, PlayAreaBounded};
 use crate::{AppSystems, PausableSystems, asset_tracking::LoadResource};
 
@@ -223,7 +223,7 @@ define_get_mood_interaction! {
         (Happy, Neutral) => (Happy, Calm), // Happy lifts Neutral to Calm.
 
         // Calm interactions
-        (Calm, Sad) => (Calm, Calm),     // Calm soothes Sad to Calm.
+        (Calm, Sad) => (Calm, Sad),     // Calm soothes Sad to Calm.
         (Calm, Neutral) => (Calm, Calm), // Calm influences Neutral.
 
         // Sad interactions
@@ -276,8 +276,13 @@ fn update_entity_mood(
 /// Handle collision events for mood-based social interactions
 fn handle_collision_events(
     mut collision_started: EventReader<CollisionStarted>,
-    mut moodel_query: Query<(&mut Mood, &mut MoodEntity, &mut Sprite), With<AiEntity>>,
-    ai_query: Query<(), With<AiEntity>>,
+    // The query now needs AiWanderState to check for charging and update the hit count
+    mut moodel_query: Query<
+        (&mut Mood, &mut MoodEntity, &mut Sprite, &mut AiWanderState),
+        With<AiEntity>,
+    >,
+    // We get AiConfig as a resource
+    config: Res<AiConfig>,
     mood_assets: Option<Res<MoodAssets>>,
     time: Res<Time>,
 ) -> Result {
@@ -290,48 +295,83 @@ fn handle_collision_events(
 
     // Handle collision started events - this is where social interactions happen
     for CollisionStarted(entity1, entity2) in collision_started.read() {
-        // Only handle collisions between Moodels (both entities have AiEntity)
-        if ai_query.contains(*entity1) && ai_query.contains(*entity2) {
-            // Get both entities' moods to determine interaction
-            let mood1 = moodel_query.get(*entity1).map(|(m, _, _)| *m).ok();
-            let mood2 = moodel_query.get(*entity2).map(|(m, _, _)| *m).ok();
+        // Use a let-chain for clarity if your Rust version supports it,
+        // otherwise nest the `if let`.
+        if let (Ok(moodel1), Ok(moodel2)) = (moodel_query.get(*entity1), moodel_query.get(*entity2))
+        {
+            // --- NEW: Handle Rage Burnout ---
+            let mut process_burnout = |charger_entity: Entity, _target_entity: Entity| {
+                if let Ok((mut mood, _, _, mut wander_state)) = moodel_query.get_mut(charger_entity)
+                {
+                    if *mood == Mood::Rage
+                        && matches!(wander_state.action, AiAction::Charging { .. })
+                    {
+                        wander_state.charge_hit_count += 1;
+                        info!(
+                            "Rage Moodel {:?} hit count: {}",
+                            charger_entity, wander_state.charge_hit_count
+                        );
+                        if wander_state.charge_hit_count >= config.rage_max_hits_before_burnout {
+                            info!(
+                                "Rage Moodel {:?} burned out! Becoming Calm.",
+                                charger_entity
+                            );
+                            if let Ok((mut mood, mut mood_entity, mut sprite, mut wander_state)) =
+                                moodel_query.get_mut(charger_entity)
+                            {
+                                // Become calm and reset state
+                                update_entity_mood(
+                                    charger_entity,
+                                    &mut mood,
+                                    &mut mood_entity,
+                                    &mut sprite,
+                                    &mood_assets,
+                                    Mood::Calm,
+                                );
+                                wander_state.action = AiAction::Wandering;
+                                wander_state.charge_hit_count = 0;
+                            }
+                        }
+                    }
+                }
+            };
 
-            if let (Some(mood1), Some(mood2)) = (mood1, mood2) {
-                // Calculate the mood interaction result
-                let (new_mood1, new_mood2) = get_mood_interaction(mood1, mood2);
+            process_burnout(*entity1, *entity2);
+            process_burnout(*entity2, *entity1);
+            // --- End of Burnout Logic ---
 
-                #[cfg(feature = "dev")]
-                info!(
-                    "Mood interaction: {:?} + {:?} → {:?} + {:?}",
-                    mood1, mood2, new_mood1, new_mood2
+            // Regular mood interaction logic
+            let (mood1, _, _, _) = moodel_query.get(*entity1).unwrap();
+            let (mood2, _, _, _) = moodel_query.get(*entity2).unwrap();
+            let (new_mood1, new_mood2) = get_mood_interaction(*mood1, *mood2);
+
+            #[cfg(feature = "dev")]
+            info!(
+                "Mood interaction: {:?} + {:?} → {:?} + {:?}",
+                mood1, mood2, new_mood1, new_mood2
+            );
+
+            if let Ok((mut mood, mut mood_entity, mut sprite, _)) = moodel_query.get_mut(*entity1) {
+                mood_entity.last_interaction_time = current_time;
+                update_entity_mood(
+                    *entity1,
+                    &mut mood,
+                    &mut mood_entity,
+                    &mut sprite,
+                    &mood_assets,
+                    new_mood1,
                 );
-
-                // Apply mood changes to both entities
-                if let Ok((mut mood, mut mood_entity, mut sprite)) = moodel_query.get_mut(*entity1)
-                {
-                    mood_entity.last_interaction_time = current_time;
-                    update_entity_mood(
-                        *entity1,
-                        &mut mood,
-                        &mut mood_entity,
-                        &mut sprite,
-                        &mood_assets,
-                        new_mood1,
-                    );
-                }
-
-                if let Ok((mut mood, mut mood_entity, mut sprite)) = moodel_query.get_mut(*entity2)
-                {
-                    mood_entity.last_interaction_time = current_time;
-                    update_entity_mood(
-                        *entity2,
-                        &mut mood,
-                        &mut mood_entity,
-                        &mut sprite,
-                        &mood_assets,
-                        new_mood2,
-                    );
-                }
+            }
+            if let Ok((mut mood, mut mood_entity, mut sprite, _)) = moodel_query.get_mut(*entity2) {
+                mood_entity.last_interaction_time = current_time;
+                update_entity_mood(
+                    *entity2,
+                    &mut mood,
+                    &mut mood_entity,
+                    &mut sprite,
+                    &mood_assets,
+                    new_mood2,
+                );
             }
         }
     }
@@ -428,16 +468,24 @@ fn handle_isolation_decay(
         // Check if entity has been isolated (no interactions for a while)
         if mood_entity.isolation_timer.just_finished() {
             let time_since_interaction = current_time - mood_entity.last_interaction_time;
+            let mut rng = rand::rng(); // Use thread_rng for one-off uses
 
-            // If isolated for more than 3 seconds (matching spec), start mood decay toward neutral
-            if time_since_interaction > 3.0 {
-                // Changed from 5.0 to 3.0
+            // If isolated for more than 5 seconds (matching spec), start mood decay toward neutral
+            if (time_since_interaction > 2.0 && *mood != Mood::Rage) || time_since_interaction > 6.0
+            {
                 let new_mood = match *mood {
-                    Mood::Rage => Mood::Neutral,    // Rage cools to Neutral
-                    Mood::Happy => Mood::Neutral,   // Happiness fades to Neutral
-                    Mood::Sad => Mood::Neutral,     // Sadness lifts to Neutral
-                    Mood::Calm => Mood::Neutral,    // Calm becomes Neutral
-                    Mood::Neutral => Mood::Neutral, // Already neutral
+                    Mood::Rage => Mood::Calm,    // Rage cools to Neutral
+                    Mood::Happy => Mood::Calm,   // Happiness fades to Neutral
+                    Mood::Sad => Mood::Neutral,  // Sadness lifts to Neutral
+                    Mood::Calm => Mood::Neutral, // Calm becomes Neutral
+                    Mood::Neutral => match rng.random_range(0..100u8) {
+                        // equal chance to change to any mood
+                        r if r < 20 => Mood::Happy, // 20% chance to become Happy
+                        r if r < 40 => Mood::Sad,   // 20% chance to become Sad
+                        r if r < 60 => Mood::Rage,  // 20% chance to become Rage
+                        r if r < 80 => Mood::Calm,  // 20% chance to become Calm
+                        _ => Mood::Neutral,         // Otherwise stay Neutral
+                    },
                 };
 
                 if new_mood != *mood {

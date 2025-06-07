@@ -1,34 +1,77 @@
 //! AI-controlled entities behavior.
 //!
 //! This module provides a mood-driven AI system. Entities exhibit complex
-//! behaviors such as organic wandering, flocking/repulsion, and state-based
-//! abilities, all determined by their current `Mood`.
+//! behaviors such as organic wandering, flocking/repulsion, boundary avoidance,
+//! and state-based abilities, all determined by their current `Mood`.
 
 use bevy::prelude::*;
 use noisy_bevy::fbm_simplex_2d_seeded;
 use rand::Rng;
+use std::ops::Range;
 
 use crate::{
+    demo::{
+        mood::Mood,
+        movement::{MovementController, PlayArea},
+    },
     AppSystems, PausableSystems,
-    demo::{mood::Mood, movement::MovementController},
 };
 
+/// Configuration resource for AI behavior parameters
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
+pub struct AiConfig {
+    // Magnetism strengths
+    pub cohesion_strength: f32,
+    pub separation_strength: f32,
+    // Boundary avoidance
+    pub avoidance_margin: f32,
+    pub avoidance_strength: f32,
+    // Rage-specific tuning
+    pub rage_charge_aim_duration: f32,
+    pub rage_charge_duration: f32,
+    pub rage_charge_cooldown: Range<f32>,
+    pub rage_max_hits_before_burnout: u32,
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            cohesion_strength: 0.05,
+            separation_strength: 0.5,
+            avoidance_margin: 100.0,
+            avoidance_strength: 2.0,
+            rage_charge_aim_duration: 0.75,
+            rage_charge_duration: 1.5,
+            rage_charge_cooldown: 5.0..8.0,
+            rage_max_hits_before_burnout: 3,
+        }
+    }
+}
+
 pub(super) fn plugin(app: &mut App) {
-    // Register all new and modified components
+    // Register and initialize the new AiConfig resource
+    app.register_type::<AiConfig>();
+    app.init_resource::<AiConfig>();
+    
+    // Register all AI components
     app.register_type::<AiEntity>();
     app.register_type::<AiWanderState>();
     app.register_type::<AiMagnetism>();
     app.register_type::<AiAction>();
 
-    // Add the new AI systems to the update schedule
+    // Add the new AI systems to the update schedule in a specific order
     app.add_systems(
         Update,
         (
-            // The behavior system runs first to set the base intent and handle state changes.
+            // 1. Set the base wander/action intent.
             update_ai_behavior,
-            // The magnetism system runs after to modify the intent with social forces.
-            update_ai_magnetism.after(update_ai_behavior),
+            // 2. Modify the intent with social flocking/repulsion forces.
+            update_ai_magnetism,
+            // 3. Add a final, strong force to avoid play area boundaries.
+            update_ai_boundary_avoidance,
         )
+            .chain()
             .in_set(AppSystems::Update)
             .in_set(PausableSystems),
     );
@@ -109,6 +152,8 @@ pub struct AiWanderState {
     pub action: AiAction,
     /// Cooldown timer for special abilities like the Rage charge.
     pub ability_cooldown: Timer,
+    /// Counter for rage burnout - tracks hits during charge sequence.
+    pub charge_hit_count: u32,
 }
 
 impl AiWanderState {
@@ -119,16 +164,16 @@ impl AiWanderState {
             state_timer: Timer::from_seconds(rng.random_range(0.5..1.5), TimerMode::Once),
             noise_seed: rng.random(),
             action: AiAction::Wandering,
-            // Initial cooldown so they don't all charge at the start.
             ability_cooldown: Timer::from_seconds(rng.random_range(3.0..6.0), TimerMode::Once),
+            charge_hit_count: 0, // Initialize to zero
         }
     }
 }
 
 /// System that updates the AI's core action state and base movement intent.
-/// This acts as a state machine, especially for the Rage mood's charge ability.
 fn update_ai_behavior(
     time: Res<Time>,
+    config: Res<AiConfig>, // Get the config resource
     all_moodels: Query<(Entity, &Transform, &Mood)>,
     mut ai_query: Query<
         (
@@ -143,85 +188,63 @@ fn update_ai_behavior(
 ) {
     let mut rng = rand::rng();
 
-    // Collect potential targets for the Rage charge to avoid query conflicts.
     let potential_targets: Vec<_> = all_moodels
         .iter()
         .filter(|(_, _, mood)| **mood != Mood::Rage)
         .collect();
 
     for (entity, transform, mut controller, mut wander_state, mood) in &mut ai_query {
-        // Tick timers
         wander_state.state_timer.tick(time.delta());
         wander_state.ability_cooldown.tick(time.delta());
 
-        // --- AI STATE MACHINE ---
-        match &mut wander_state.action {
+        match wander_state.action.clone() {
             AiAction::Wandering => {
-                // If this is a Rage moodel and its ability is ready, look for a target.
                 if *mood == Mood::Rage && wander_state.ability_cooldown.just_finished() {
                     let closest_target = potential_targets
                         .iter()
                         .filter(|(target_entity, _, _)| *target_entity != entity)
                         .min_by_key(|(_, target_transform, _)| {
-                            let distance =
-                                transform.translation.distance(target_transform.translation);
+                            let distance = transform.translation.distance(target_transform.translation);
                             (distance * 100.0) as u32
                         });
 
                     if let Some((target_entity, _, _)) = closest_target {
                         info!("Rage Moodel {:?} is AIMING at {:?}", entity, target_entity);
-                        wander_state.action = AiAction::Aiming {
-                            target: *target_entity,
-                        };
-                        wander_state
-                            .state_timer
-                            .set_duration(std::time::Duration::from_secs_f32(0.75));
+                        wander_state.action = AiAction::Aiming { target: *target_entity };
+                        // Use config value for aim duration
+                        wander_state.state_timer.set_duration(std::time::Duration::from_secs_f32(config.rage_charge_aim_duration));
                         wander_state.state_timer.reset();
-                        controller.intent = Vec2::ZERO; // Stop moving
-                        continue; // Skip wander logic this frame
+                        // Reset hit count for the new charge sequence
+                        wander_state.charge_hit_count = 0;
+                        controller.intent = Vec2::ZERO;
+                        continue;
                     }
                 }
-
-                // --- Default Wander Logic ---
-                // (This code runs if the entity is in the Wandering state)
-                let base_intent = get_wander_intent(mood, &mut wander_state, &time, &mut rng);
-                controller.intent = base_intent;
+                controller.intent = get_wander_intent(mood, &mut wander_state, &time, &mut rng);
             }
-
             AiAction::Aiming { target } => {
-                controller.intent = Vec2::ZERO; // Stay still
-                let target_entity = *target;
+                controller.intent = Vec2::ZERO;
                 if wander_state.state_timer.just_finished() {
-                    if let Ok((_, target_transform, _)) = all_moodels.get(target_entity) {
+                    if let Ok((_, target_transform, _)) = all_moodels.get(target) {
                         info!("Rage Moodel {:?} is CHARGING!", entity);
                         wander_state.action = AiAction::Charging {
                             target_pos: target_transform.translation.truncate(),
                         };
-                        wander_state
-                            .state_timer
-                            .set_duration(std::time::Duration::from_secs_f32(1.5));
+                        // Use config value for charge duration
+                        wander_state.state_timer.set_duration(std::time::Duration::from_secs_f32(config.rage_charge_duration));
                         wander_state.state_timer.reset();
                     } else {
-                        // Target disappeared, go back to wandering.
                         wander_state.action = AiAction::Wandering;
                     }
                 }
             }
-
             AiAction::Charging { target_pos } => {
-                // Move with great purpose towards the last known position.
-                let direction =
-                    (*target_pos - transform.translation.truncate()).normalize_or_zero();
-                controller.intent = direction;
-
+                controller.intent = (target_pos - transform.translation.truncate()).normalize_or_zero();
                 if wander_state.state_timer.just_finished() {
                     info!("Rage Moodel {:?} charge complete.", entity);
                     wander_state.action = AiAction::Wandering;
-                    wander_state
-                        .ability_cooldown
-                        .set_duration(std::time::Duration::from_secs_f32(
-                            rng.random_range(5.0..8.0),
-                        ));
+                    // Use config value for cooldown
+                    wander_state.ability_cooldown.set_duration(std::time::Duration::from_secs_f32(rng.random_range(config.rage_charge_cooldown.clone())));
                     wander_state.ability_cooldown.reset();
                 }
             }
@@ -229,57 +252,36 @@ fn update_ai_behavior(
     }
 }
 
-/// System that applies flocking and repulsion forces to AI entities.
+/// System that applies flocking and repulsion forces, respecting priority actions.
 fn update_ai_magnetism(
-    mut query: Query<
-        (
-            Entity,
-            &Transform,
-            &Mood,
-            &mut MovementController,
-            &AiMagnetism,
-        ),
-        With<AiEntity>,
-    >,
+    config: Res<AiConfig>, // Get the config resource
+    mut query: Query<(Entity, &Transform, &Mood, &mut MovementController, &AiWanderState, &AiMagnetism), With<AiEntity>>,
     all_moodels: Query<(Entity, &Transform, &Mood)>,
 ) {
-    // Collect all positions into a Vec to safely iterate while modifying the query.
-    // This avoids the classic "cannot borrow Query as mutable more than once" error.
     let positions: Vec<_> = all_moodels.iter().collect();
 
-    for (entity, transform, mood, mut controller, magnetism) in &mut query {
+    for (entity, transform, mood, mut controller, wander_state, magnetism) in &mut query {
+        // PRIORITY OVERRIDE: If the AI is not wandering, skip all magnetism.
+        if wander_state.action != AiAction::Wandering {
+            continue;
+        }
         let mut cohesion_vec = Vec2::ZERO;
         let mut separation_vec = Vec2::ZERO;
         let mut friendly_neighbor_count = 0;
 
         for (other_entity, other_transform, other_mood) in &positions {
-            if entity == *other_entity {
-                continue;
-            }
-
-            let distance = transform
-                .translation
-                .truncate()
-                .distance(other_transform.translation.truncate());
+            if entity == *other_entity { continue; }
+            let distance = transform.translation.truncate().distance(other_transform.translation.truncate());
 
             if distance < magnetism.vision_radius {
-                // 1. Separation: Push away from all neighbors to avoid crowding.
                 if distance < magnetism.separation_distance {
-                    if let Some(dir) = (transform.translation.truncate()
-                        - other_transform.translation.truncate())
-                    .try_normalize()
-                    {
-                        // Force is stronger the closer the entities are.
+                    if let Some(dir) = (transform.translation.truncate() - other_transform.translation.truncate()).try_normalize() {
                         separation_vec += dir / (distance + 0.1);
                     }
                 }
-
-                // 2. Cohesion/Repulsion: Attract or repel based on mood interaction.
                 let attraction_factor = get_attraction_factor(*mood, **other_mood);
                 if attraction_factor != 0.0 {
-                    cohesion_vec += (other_transform.translation.truncate()
-                        - transform.translation.truncate())
-                        * attraction_factor;
+                    cohesion_vec += (other_transform.translation.truncate() - transform.translation.truncate()) * attraction_factor;
                     if attraction_factor > 0.0 {
                         friendly_neighbor_count += 1;
                     }
@@ -287,18 +289,58 @@ fn update_ai_magnetism(
             }
         }
 
-        // Average the cohesion vector to get the center of mass of "friends".
         if friendly_neighbor_count > 0 {
             cohesion_vec /= friendly_neighbor_count as f32;
         }
 
-        // Combine the forces.
-        let magnetic_force = (cohesion_vec * magnetism.cohesion_strength)
-            + (separation_vec * magnetism.separation_strength);
-
-        // Add the magnetic force to the base wander intent and re-normalize.
-        controller.intent = (controller.intent + magnetic_force).normalize_or_zero();
+        // Use config values for strengths
+        let magnetic_force = (cohesion_vec * config.cohesion_strength) + (separation_vec * config.separation_strength);
+        controller.intent += magnetic_force;
     }
+}
+
+/// System to steer AI away from play area edges, respecting priority actions.
+fn update_ai_boundary_avoidance(
+    play_area: Res<PlayArea>,
+    config: Res<AiConfig>, // Get the config resource
+    mut query: Query<(&Transform, &mut MovementController, &AiWanderState), With<AiEntity>>,
+) {
+    let half_size = play_area.size / 2.0;
+    let boundaries = Rect::from_center_half_size(play_area.center, half_size);
+
+    for (transform, mut controller, wander_state) in &mut query {
+        // PRIORITY OVERRIDE: If the AI is not wandering, skip boundary avoidance.
+        if wander_state.action != AiAction::Wandering {
+            continue;
+        }
+        let pos = transform.translation.truncate();
+        let mut avoidance_force = Vec2::ZERO;
+
+        // Use config values for margin and strength
+        if pos.x < boundaries.min.x + config.avoidance_margin {
+            avoidance_force.x = config.avoidance_strength;
+        }
+        if pos.x > boundaries.max.x - config.avoidance_margin {
+            avoidance_force.x = -config.avoidance_strength;
+        }
+        if pos.y < boundaries.min.y + config.avoidance_margin {
+            avoidance_force.y = config.avoidance_strength;
+        }
+        if pos.y > boundaries.max.y - config.avoidance_margin {
+            avoidance_force.y = -config.avoidance_strength;
+        }
+
+        // Add the avoidance force to the final intent. This force is strong
+        // and should override other behaviors when near a wall.
+        controller.intent += avoidance_force;
+    }
+}
+
+/// Generates a noise vector using different seeds for X and Y axes for more random movement.
+fn get_2d_noise(input: f32, octaves: u8, seed: f32) -> Vec2 {
+    let noise_x = fbm_simplex_2d_seeded(Vec2::new(input, 0.0), octaves as usize, 0.5, 2.0, seed);
+    let noise_y = fbm_simplex_2d_seeded(Vec2::new(0.0, input), octaves as usize, 0.5, 2.0, seed + 1000.0);
+    Vec2::new(noise_x, noise_y)
 }
 
 /// Helper function to calculate the base wandering direction using Perlin noise.
@@ -308,100 +350,41 @@ fn get_wander_intent(
     time: &Time,
     rng: &mut impl Rng,
 ) -> Vec2 {
-    let mut intent = Vec2::ZERO;
+    let time_input = time.elapsed_secs();
     match mood {
-        Mood::Happy | Mood::Rage => {
-            let noise_input = time.elapsed_secs() * 0.5;
-            let noise_x = fbm_simplex_2d_seeded(
-                Vec2::new(noise_input, 0.0),
-                4,
-                0.5,
-                2.0,
-                wander_state.noise_seed,
-            );
-            let noise_y = fbm_simplex_2d_seeded(
-                Vec2::new(0.0, noise_input),
-                4,
-                0.5,
-                2.0,
-                wander_state.noise_seed + 1000.0,
-            );
-            intent = Vec2::new(noise_x, noise_y).normalize_or_zero();
+        Mood::Happy => {
+            let flock_wander = get_2d_noise(time_input * 0.2, 2, wander_state.noise_seed);
+            flock_wander * 0.3
         }
-        Mood::Calm | Mood::Neutral => {
-            if !wander_state.state_timer.finished() {
-                let noise_input = time.elapsed_secs() * 0.2;
-                let noise_x = fbm_simplex_2d_seeded(
-                    Vec2::new(noise_input, 0.0),
-                    2,
-                    0.5,
-                    2.0,
-                    wander_state.noise_seed,
-                );
-                let noise_y = fbm_simplex_2d_seeded(
-                    Vec2::new(0.0, noise_input),
-                    2,
-                    0.5,
-                    2.0,
-                    wander_state.noise_seed + 1000.0,
-                );
-                intent = Vec2::new(noise_x, noise_y).normalize_or_zero();
-            } else if wander_state.state_timer.just_finished() {
-                wander_state
-                    .state_timer
-                    .set_duration(std::time::Duration::from_secs_f32(
-                        rng.random_range(2.0..4.0),
-                    ));
-                wander_state.state_timer.reset();
-            }
-        }
+        Mood::Rage => get_2d_noise(time_input * 0.5, 4, wander_state.noise_seed).normalize_or_zero(),
+        Mood::Calm => get_2d_noise(time_input * 0.1, 1, wander_state.noise_seed).normalize_or_zero() * 0.5,
+        Mood::Neutral => get_2d_noise(time_input * 0.3, 2, wander_state.noise_seed).normalize_or_zero() * 0.6,
         Mood::Sad => {
             if !wander_state.state_timer.finished() {
-                let noise_input = time.elapsed_secs() * 0.1;
-                let noise_x = fbm_simplex_2d_seeded(
-                    Vec2::new(noise_input, 0.0),
-                    1,
-                    0.5,
-                    2.0,
-                    wander_state.noise_seed,
-                );
-                let noise_y = fbm_simplex_2d_seeded(
-                    Vec2::new(0.0, noise_input),
-                    1,
-                    0.5,
-                    2.0,
-                    wander_state.noise_seed + 1000.0,
-                );
-                intent = Vec2::new(noise_x, noise_y).normalize_or_zero();
-            } else if wander_state.state_timer.just_finished() {
-                wander_state
-                    .state_timer
-                    .set_duration(std::time::Duration::from_secs_f32(
-                        rng.random_range(3.0..6.0),
-                    ));
-                wander_state.state_timer.reset();
+                get_2d_noise(time_input * 0.1, 1, wander_state.noise_seed).normalize_or_zero() * 0.4
+            } else {
+                if wander_state.state_timer.just_finished() {
+                    wander_state.state_timer.set_duration(std::time::Duration::from_secs_f32(rng.random_range(3.0..6.0)));
+                    wander_state.state_timer.reset();
+                }
+                Vec2::ZERO
             }
         }
     }
-    intent
 }
 
 /// Helper function to define the magnetic interaction between two moods.
-/// Returns: > 0 for attraction, < 0 for repulsion, 0 for neutral.
 fn get_attraction_factor(my_mood: Mood, other_mood: Mood) -> f32 {
     use Mood::*;
     match (my_mood, other_mood) {
-        // Happy loves company
         (Happy, Happy) => 1.0,
         (Happy, Calm) => 0.3,
-        // Sad huddles with other Sad, but avoids energetic moods
         (Sad, Sad) => 0.5,
         (Sad, Happy) => -0.8,
         (Sad, Rage) => -1.0,
-        // Rage wants to be alone
-        (Rage, _) if my_mood != other_mood => -1.0,
-        // Calm is content
+        (Rage, _) => -1.0,
         (Calm, Calm) => 0.2,
+        (Neutral, _) => -0.1,
         _ => 0.0,
     }
 }

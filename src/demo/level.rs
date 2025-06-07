@@ -152,11 +152,11 @@ pub fn spawn_level(
         // Spawn mood objects around the play area
         let mood_objects = [
             (Mood::Rage, Vec3::new(-300.0, 200.0, 0.0)), // Top left - red triangle
-            (Mood::Sad, Vec3::new(300.0, 200.0, 0.0)),   // Top right - blue circle
-            (Mood::Happy, Vec3::new(-300.0, -200.0, 0.0)), // Bottom left - yellow star
-            (Mood::Calm, Vec3::new(300.0, -200.0, 0.0)), // Bottom right - green circle
-            (Mood::Rage, Vec3::new(0.0, 250.0, 0.0)),    // Top center - another rage trigger
-            (Mood::Sad, Vec3::new(0.0, -250.0, 0.0)),    // Bottom center - another sad trigger
+         //   (Mood::Sad, Vec3::new(300.0, 200.0, 0.0)),   // Top right - blue circle
+         //   (Mood::Happy, Vec3::new(-300.0, -200.0, 0.0)), // Bottom left - yellow star
+         //   (Mood::Calm, Vec3::new(300.0, -200.0, 0.0)), // Bottom right - green circle
+         //   (Mood::Rage, Vec3::new(0.0, 250.0, 0.0)),    // Top center - another rage trigger
+         //   (Mood::Sad, Vec3::new(0.0, -250.0, 0.0)),    // Bottom center - another sad trigger
         ];
 
         for (mood, position) in mood_objects {
