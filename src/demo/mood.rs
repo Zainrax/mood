@@ -267,7 +267,7 @@ define_get_mood_interaction! {
     }
 }
 
-/// Updates mood for a single entity
+/// Updates mood for a single entity and emits mood change events
 fn update_entity_mood(
     entity: Entity,
     mood: &mut Mood,
@@ -275,17 +275,25 @@ fn update_entity_mood(
     sprite: &mut Sprite,
     mood_assets: &MoodAssets,
     new_mood: Mood,
+    sfx_writer: &mut EventWriter<crate::audio::PlaySound>,
 ) {
     if new_mood != *mood {
+        let old_mood = *mood;
         *mood = new_mood;
         sprite.image = mood_assets.get_sprite(new_mood);
         sprite.color = new_mood.color();
         mood_entity.mood_stability = 0.0; // Reset stability on change
 
+        // Emit mood change event for audio system
+        sfx_writer.write(crate::audio::PlaySound::MoodChanged { 
+            from: old_mood, 
+            to: new_mood 
+        });
+
         #[cfg(feature = "dev")]
         info!(
-            "Entity {:?} mood changed to {:?} through interaction",
-            entity, new_mood
+            "Entity {:?} mood changed from {:?} to {:?}",
+            entity, old_mood, new_mood
         );
     }
 }
@@ -302,6 +310,7 @@ fn handle_collision_events(
     config: Res<AiConfig>,
     mood_assets: Option<Res<MoodAssets>>,
     time: Res<Time>,
+    mut sfx_writer: EventWriter<crate::audio::PlaySound>,
 ) -> Result {
     // Early return if assets aren't loaded yet
     let Some(mood_assets) = mood_assets else {
@@ -344,6 +353,7 @@ fn handle_collision_events(
                                     &mut sprite,
                                     &mood_assets,
                                     Mood::Calm,
+                                    &mut sfx_writer,
                                 );
                                 wander_state.action = AiAction::Wandering;
                                 wander_state.charge_hit_count = 0;
@@ -362,6 +372,12 @@ fn handle_collision_events(
             let (mood2, _, _, _) = moodel_query.get(*entity2).unwrap();
             let (new_mood1, new_mood2) = get_mood_interaction(*mood1, *mood2);
 
+            // Emit collision event for audio system
+            sfx_writer.write(crate::audio::PlaySound::MoodCollision { 
+                mood1: *mood1, 
+                mood2: *mood2 
+            });
+
             #[cfg(feature = "dev")]
             info!(
                 "Mood interaction: {:?} + {:?} → {:?} + {:?}",
@@ -377,6 +393,7 @@ fn handle_collision_events(
                     &mut sprite,
                     &mood_assets,
                     new_mood1,
+                    &mut sfx_writer,
                 );
             }
             if let Ok((mut mood, mut mood_entity, mut sprite, _)) = moodel_query.get_mut(*entity2) {
@@ -388,6 +405,7 @@ fn handle_collision_events(
                     &mut sprite,
                     &mood_assets,
                     new_mood2,
+                    &mut sfx_writer,
                 );
             }
         }
@@ -403,6 +421,7 @@ fn handle_mood_object_collisions(
     mut mood_object_query: Query<&mut MoodObject>,
     mood_assets: Option<Res<MoodAssets>>,
     time: Res<Time>,
+    mut sfx_writer: EventWriter<crate::audio::PlaySound>,
 ) -> Result {
     // Early return if assets aren't loaded yet
     let Some(mood_assets) = mood_assets else {
@@ -444,6 +463,7 @@ fn handle_mood_object_collisions(
                             &mut sprite,
                             &mood_assets,
                             target_mood,
+                            &mut sfx_writer,
                         );
 
                         // Update interaction time and record hit
@@ -469,6 +489,7 @@ fn handle_isolation_decay(
     time: Res<Time>,
     mood_assets: Option<Res<MoodAssets>>,
     mut moodel_query: Query<(Entity, &mut Mood, &mut MoodEntity, &mut Sprite), With<AiEntity>>,
+    mut sfx_writer: EventWriter<crate::audio::PlaySound>,
 ) -> Result {
     // Early return if assets aren't loaded yet
     let Some(mood_assets) = mood_assets else {
@@ -517,6 +538,7 @@ fn handle_isolation_decay(
                         &mut sprite,
                         &mood_assets,
                         new_mood,
+                        &mut sfx_writer,
                     );
 
                     #[cfg(feature = "dev")]

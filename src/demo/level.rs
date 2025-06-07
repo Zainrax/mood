@@ -3,14 +3,17 @@
 
 use avian2d::prelude::*;
 use bevy::prelude::*;
+use bevy::ecs::system::RunSystemOnce;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use super::level_library;
 use crate::{
+    asset_tracking::LoadResource,
+    audio::{music, PlaySound},
     AppSystems, PausableSystems,
     demo::{
-        mood::{Mood, MoodAssets, spawn_moodel_bundle},
+        mood::{spawn_moodel_bundle, Mood, MoodAssets},
         movement::PlayArea,
     },
     screens::Screen,
@@ -22,12 +25,14 @@ pub(super) fn plugin(app: &mut App) {
     app.register_type::<GoalZone>();
     app.register_type::<PulseAnimation>();
     app.register_type::<AnimateScale>();
+    app.register_type::<LevelAssets>();
     app.add_event::<SpawnLevel>();
 
     // Resources to manage level state
     app.init_resource::<LevelHandle>();
     app.init_resource::<ActiveLevel>();
     app.init_resource::<FontHandle>();
+    app.load_resource::<LevelAssets>();
 
     // Core systems for level lifecycle
     app.add_systems(Update, handle_spawn_requests);
@@ -35,6 +40,8 @@ pub(super) fn plugin(app: &mut App) {
         Update,
         process_loaded_level.run_if(resource_exists::<LevelLoadingState>),
     );
+    app.add_systems(OnEnter(Screen::Gameplay), spawn_level_entities);
+    app.add_systems(OnExit(Screen::Gameplay), teardown_level);
 
     // Gameplay logic systems
     app.add_systems(
@@ -43,11 +50,9 @@ pub(super) fn plugin(app: &mut App) {
             hot_reload_level,
             (
                 handle_zone_collisions,
-                // --- THE FIX: Split the conflicting system into two ---
-                update_zone_state.after(handle_zone_collisions),
-                update_zone_visuals.after(update_zone_state),
-                // ---
-                check_win_condition.after(update_zone_visuals),
+                update_zone_state,
+                update_zone_visuals,
+                check_win_condition,
                 // Animation systems
                 animate_scale_pop,
                 pulse_zone_animation,
@@ -61,6 +66,22 @@ pub(super) fn plugin(app: &mut App) {
 }
 
 // --- Resources, Components & Events ---
+
+#[derive(Resource, Asset, Clone, Reflect)]
+#[reflect(Resource)]
+pub struct LevelAssets {
+    #[dependency]
+    music: Handle<AudioSource>,
+}
+
+impl FromWorld for LevelAssets {
+    fn from_world(world: &mut World) -> Self {
+        let assets = world.resource::<AssetServer>();
+        Self {
+            music: assets.load("audio/music/Gymnopédie No.1.ogg"),
+        }
+    }
+}
 
 #[derive(Resource, Default)]
 pub struct FontHandle(pub Handle<Font>);
@@ -158,7 +179,7 @@ pub struct GoalZoneData {
 fn teardown_level(mut commands: Commands, query: Query<Entity, With<LevelEntity>>) {
     info!("Tearing down level...");
     for entity in &query {
-        commands.entity(entity).despawn_recursive();
+        commands.entity(entity).despawn();
     }
 }
 
@@ -182,7 +203,8 @@ fn handle_spawn_requests(
                 if let Some(level) = level_library::get_level_by_id(&id) {
                     active_level.0 = Some(level);
                     level_handle.0 = Handle::default();
-                    commands.run_system_cached(spawn_level_entities);
+                    // Trigger spawn immediately for programmatic levels
+                    commands.run_system_cached(spawn_level_entities_oneshot);
                 } else {
                     error!("Could not find programmatic level with ID: {}", id);
                 }
@@ -194,7 +216,7 @@ fn handle_spawn_requests(
 
 fn process_loaded_level(
     mut commands: Commands,
-    mut level_assets: ResMut<Assets<Level>>,
+    level_assets: ResMut<Assets<Level>>,
     level_handle: Res<LevelHandle>,
     mut active_level: ResMut<ActiveLevel>,
 ) {
@@ -202,163 +224,124 @@ fn process_loaded_level(
         info!("Level asset loaded, processing...");
         active_level.0 = Some(loaded_level.clone());
         commands.remove_resource::<LevelLoadingState>();
-        commands.run_system_cached(spawn_level_entities);
+        commands.run_system_cached(spawn_level_entities_oneshot);
     }
 }
 
+// Standard Bevy system for spawning level entities
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_level_entities(world: &mut World) {
-    // First despawn any existing level entities
-    let entities_to_despawn: Vec<Entity> = world
-        .query_filtered::<Entity, With<LevelEntity>>()
-        .iter(world)
-        .collect();
-
-    for entity in entities_to_despawn {
-        world.entity_mut(entity).despawn_recursive();
-    }
-
-    // Get resources we need
-    let active_level = world.resource::<ActiveLevel>();
+pub fn spawn_level_entities(
+    mut commands: Commands,
+    active_level: Res<ActiveLevel>,
+    mut play_area: ResMut<PlayArea>,
+    mood_assets: Res<MoodAssets>,
+    level_assets: Res<LevelAssets>,
+    time: Res<Time>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    font_handle: Res<FontHandle>,
+) {
     let Some(level) = &active_level.0 else {
         error!("Attempted to spawn level, but no active level data was found!");
         return;
     };
-    let level = level.clone(); // Clone to avoid borrow issues
 
     info!("Spawning level entities for: {}", level.name);
 
-    // Update play area
-    let mut play_area = world.resource_mut::<PlayArea>();
+    // Note: Existing level entities are cleaned up by OnExit(Screen::Gameplay)
+
     play_area.center = Vec2::ZERO;
     play_area.size = level.play_area;
 
-    // Get other resources
-    let mood_assets = world.resource::<MoodAssets>().clone();
-    let time = world.resource::<Time>();
-    let elapsed_secs = time.elapsed_secs();
-    let font_handle = world.resource::<FontHandle>().0.clone();
-
     // Spawn Moodels
     for data in &level.moodels {
-        world.spawn((
+        commands.spawn((
             spawn_moodel_bundle(
                 data.mood,
                 &mood_assets,
                 data.position.extend(0.0),
-                350.0, // Default max speed
-                elapsed_secs,
+                350.0,
+                time.elapsed_secs(),
             ),
             LevelEntity,
             StateScoped(Screen::Gameplay),
         ));
     }
 
-    // Spawn Obstacles with enhanced visuals
+    // Spawn Obstacles
     for data in &level.obstacles {
         match &data.kind {
             ObstacleKind::Wall { size } => {
                 let border_thickness = 4.0;
-                let parent_entity = world
-                    .spawn((
-                        Name::new("Wall"),
-                        Obstacle,
-                        LevelEntity,
-                        StateScoped(Screen::Gameplay),
-                        Transform::from_xyz(data.position.x, data.position.y, 0.0),
-                        Visibility::default(),
-                        RigidBody::Static,
-                        Collider::rectangle(size.x, size.y),
-                    ))
-                    .id();
-
-                // Border (slightly larger, darker)
-                let mut meshes = world.resource_mut::<Assets<Mesh>>();
-                let border_mesh = meshes.add(Rectangle::new(size.x, size.y));
-                let inner_mesh = meshes.add(Rectangle::new(
-                    size.x - border_thickness,
-                    size.y - border_thickness,
-                ));
-
-                let mut materials = world.resource_mut::<Assets<ColorMaterial>>();
-                let border_material = materials.add(Color::srgb(0.25, 0.25, 0.3));
-                let inner_material = materials.add(Color::srgb(0.4, 0.4, 0.5));
-
-                // Spawn border as child
-                let border_entity = world
-                    .spawn((
-                        Mesh2d(border_mesh),
-                        MeshMaterial2d(border_material),
+                commands.spawn((
+                    Name::new("Wall"),
+                    Obstacle, LevelEntity, StateScoped(Screen::Gameplay),
+                    Transform::from_xyz(data.position.x, data.position.y, 0.0),
+                    RigidBody::Static,
+                    Collider::rectangle(size.x, size.y),
+                )).with_children(|parent| {
+                    parent.spawn((
+                        Mesh2d(meshes.add(Rectangle::new(size.x, size.y))),
+                        MeshMaterial2d(materials.add(Color::srgb(0.25, 0.25, 0.3))),
                         Transform::from_xyz(0.0, 0.0, 0.0),
-                    ))
-                    .id();
-
-                // Spawn inner fill as child
-                let inner_entity = world
-                    .spawn((
-                        Mesh2d(inner_mesh),
-                        MeshMaterial2d(inner_material),
+                    ));
+                    parent.spawn((
+                        Mesh2d(meshes.add(Rectangle::new(size.x - border_thickness, size.y - border_thickness))),
+                        MeshMaterial2d(materials.add(Color::srgb(0.4, 0.4, 0.5))),
                         Transform::from_xyz(0.0, 0.0, 0.1),
-                    ))
-                    .id();
-
-                // Set up parent-child relationships
-                world
-                    .entity_mut(parent_entity)
-                    .add_child(border_entity)
-                    .add_child(inner_entity);
+                    ));
+                });
             }
         }
     }
 
-    // Spawn Goal Zones with child text
+    // Spawn Goal Zones with modern Text API
     for data in &level.goal_zones {
-        let mut meshes = world.resource_mut::<Assets<Mesh>>();
-        let mesh = meshes.add(Rectangle::new(data.size.x, data.size.y));
-
-        let mut materials = world.resource_mut::<Assets<ColorMaterial>>();
-        let material = materials.add(data.target_mood.color().with_alpha(0.2));
-
-        let zone_entity = world
-            .spawn((
-                Name::new(format!("{:?} Goal Zone", data.target_mood)),
-                GoalZone {
-                    target_mood: data.target_mood,
-                    required_count: data.required_count,
-                    current_count: 0,
-                    is_satisfied: false,
-                    entities_inside: HashSet::new(),
-                },
-                LevelEntity,
-                StateScoped(Screen::Gameplay),
-                Mesh2d(mesh),
-                MeshMaterial2d(material),
-                Transform::from_xyz(data.position.x, data.position.y, -1.0),
-                RigidBody::Static,
-                Collider::rectangle(data.size.x, data.size.y),
-                Sensor,
-            ))
-            .id();
+        let zone_entity = commands.spawn((
+            Name::new(format!("{:?} Goal Zone", data.target_mood)),
+            GoalZone {
+                target_mood: data.target_mood,
+                required_count: data.required_count,
+                ..default()
+            },
+            LevelEntity, StateScoped(Screen::Gameplay),
+            Mesh2d(meshes.add(Rectangle::new(data.size.x, data.size.y))),
+            MeshMaterial2d(materials.add(data.target_mood.color().with_alpha(0.2))),
+            Transform::from_xyz(data.position.x, data.position.y, -1.0),
+            RigidBody::Static,
+            Collider::rectangle(data.size.x, data.size.y),
+            Sensor,
+        )).id();
 
         // Spawn the text as a child of the zone
-        let text_entity = world
-            .spawn((
+        commands.entity(zone_entity).with_children(|parent| {
+            parent.spawn((
                 GoalZoneText,
                 Text2d::new(format!("0 / {}", data.required_count)),
                 TextFont {
-                    font: font_handle.clone(),
+                    font: font_handle.0.clone(),
                     font_size: 40.0,
                     ..default()
                 },
                 TextColor(Color::WHITE.with_alpha(0.6)),
                 TextLayout::new_with_justify(JustifyText::Center),
                 Transform::from_xyz(0.0, 0.0, 0.1),
-            ))
-            .id();
-
-        // Set up parent-child relationship
-        world.entity_mut(zone_entity).add_child(text_entity);
+            ));
+        });
     }
+
+    // Spawn level music
+    commands.spawn((
+        Name::new("Level Music"),
+        music(level_assets.music.clone()),
+        LevelEntity,
+        StateScoped(Screen::Gameplay),
+    ));
+}
+
+// One-shot system wrapper for world access
+fn spawn_level_entities_oneshot(world: &mut World) {
+    let _ = world.run_system_once(spawn_level_entities);
 }
 
 fn hot_reload_level(
@@ -374,7 +357,7 @@ fn hot_reload_level(
                 info!("Level asset modified, triggering hot-reload.");
                 if let Some(updated_level) = level_assets.get(*id) {
                     active_level.0 = Some(updated_level.clone());
-                    commands.run_system_cached(spawn_level_entities);
+                    commands.run_system_cached(spawn_level_entities_oneshot);
                 }
             }
         }
@@ -390,22 +373,21 @@ fn handle_zone_collisions(
     mut ended: EventReader<CollisionEnded>,
     moodel_query: Query<(Entity, &Mood, &Transform)>,
     mut zone_query: Query<(Entity, &mut GoalZone)>,
+    mut sfx_writer: EventWriter<PlaySound>,
 ) {
     // Handle entities entering the zone
     for CollisionStarted(entity1, entity2) in started.read() {
-        let (moodel_entity, zone_entity) =
-            if moodel_query.get(*entity1).is_ok() && zone_query.get(*entity2).is_ok() {
-                (*entity1, *entity2)
-            } else if moodel_query.get(*entity2).is_ok() && zone_query.get(*entity1).is_ok() {
-                (*entity2, *entity1)
-            } else {
-                continue;
-            };
+        let (moodel_entity, zone_entity) = get_moodel_and_zone(*entity1, *entity2, &moodel_query, &zone_query);
+        if moodel_entity.is_none() { continue; }
+        let moodel_entity = moodel_entity.unwrap();
+        let zone_entity = zone_entity.unwrap();
 
         if let Ok((_, mut goal_zone)) = zone_query.get_mut(zone_entity) {
             goal_zone.entities_inside.insert(moodel_entity);
             if let Ok((_, mood, transform)) = moodel_query.get(moodel_entity) {
                 if *mood == goal_zone.target_mood {
+                    // Trigger sound effect for correct mood entering zone
+                    sfx_writer.write(PlaySound::CorrectZoneEntry);
                     commands.entity(moodel_entity).insert(AnimateScale {
                         timer: Timer::from_seconds(0.25, TimerMode::Once),
                         initial_scale: transform.scale,
@@ -417,14 +399,10 @@ fn handle_zone_collisions(
 
     // Handle entities leaving the zone
     for CollisionEnded(entity1, entity2) in ended.read() {
-        let (moodel_entity, zone_entity) =
-            if moodel_query.get(*entity1).is_ok() && zone_query.get(*entity2).is_ok() {
-                (*entity1, *entity2)
-            } else if moodel_query.get(*entity2).is_ok() && zone_query.get(*entity1).is_ok() {
-                (*entity2, *entity1)
-            } else {
-                continue;
-            };
+        let (moodel_entity, zone_entity) = get_moodel_and_zone(*entity1, *entity2, &moodel_query, &zone_query);
+        if moodel_entity.is_none() { continue; }
+        let moodel_entity = moodel_entity.unwrap();
+        let zone_entity = zone_entity.unwrap();
 
         if let Ok((_, mut goal_zone)) = zone_query.get_mut(zone_entity) {
             goal_zone.entities_inside.remove(&moodel_entity);
@@ -432,7 +410,23 @@ fn handle_zone_collisions(
     }
 }
 
-/// **NEW System 1:** Recalculates the score and satisfaction state for each zone.
+// Helper to avoid repeated code in handle_zone_collisions
+fn get_moodel_and_zone(
+    entity1: Entity,
+    entity2: Entity,
+    moodel_q: &Query<(Entity, &Mood, &Transform)>,
+    zone_q: &Query<(Entity, &mut GoalZone)>,
+) -> (Option<Entity>, Option<Entity>) {
+    if moodel_q.get(entity1).is_ok() && zone_q.get(entity2).is_ok() {
+        (Some(entity1), Some(entity2))
+    } else if moodel_q.get(entity2).is_ok() && zone_q.get(entity1).is_ok() {
+        (Some(entity2), Some(entity1))
+    } else {
+        (None, None)
+    }
+}
+
+/// Recalculates the score and satisfaction state for each zone.
 /// This system performs the MUTABLE operations on GoalZone.
 fn update_zone_state(mut zone_query: Query<&mut GoalZone>, moodel_query: Query<&Mood>) {
     for mut goal_zone in &mut zone_query {
@@ -449,43 +443,34 @@ fn update_zone_state(mut zone_query: Query<&mut GoalZone>, moodel_query: Query<&
     }
 }
 
-/// **NEW System 2:** Updates the visuals (text, color) based on the pre-calculated state.
+/// Updates the visuals (text, color) based on the pre-calculated state.
 /// This system only performs IMMUTABLE reads of GoalZone.
 fn update_zone_visuals(
     mut commands: Commands,
-    // Note: This query now has an immutable `&GoalZone`
-    zone_query: Query<
-        (Entity, &GoalZone, &MeshMaterial2d<ColorMaterial>, &Children),
-        Changed<GoalZone>,
-    >,
+    zone_query: Query<(Entity, &GoalZone, &Children), Changed<GoalZone>>,
     mut text_query: Query<(&mut Text2d, &mut TextColor), With<GoalZoneText>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    for (zone_entity, goal_zone, material_handle, children) in &zone_query {
+    for (zone_entity, goal_zone, children) in &zone_query {
         // Update text
         for child in children.iter() {
             if let Ok((mut text, mut text_color)) = text_query.get_mut(child) {
-                **text = format!("{} / {}", goal_zone.current_count, goal_zone.required_count);
+                text.0 = format!("{} / {}", goal_zone.current_count, goal_zone.required_count);
                 text_color.0 = if goal_zone.is_satisfied {
-                    Color::BLACK
+                    Color::WHITE
                 } else {
-                    Color::BLACK.with_alpha(0.6)
+                    Color::WHITE.with_alpha(0.6)
                 };
             }
         }
 
-        // Update zone background and add/remove pulse animation
-        if let Some(material) = materials.get_mut(material_handle) {
-            let initial_alpha = if goal_zone.is_satisfied { 0.6 } else { 0.2 };
-            material.color = goal_zone.target_mood.color().with_alpha(initial_alpha);
+        // Update zone background color (will be handled by pulse animation)
+        let initial_alpha = if goal_zone.is_satisfied { 0.6 } else { 0.2 };
 
-            if goal_zone.is_satisfied {
-                commands
-                    .entity(zone_entity)
-                    .insert(PulseAnimation { initial_alpha });
-            } else {
-                commands.entity(zone_entity).remove::<PulseAnimation>();
-            }
+        if goal_zone.is_satisfied {
+            commands.entity(zone_entity).insert(PulseAnimation { initial_alpha });
+        } else {
+            commands.entity(zone_entity).remove::<PulseAnimation>();
         }
     }
 }
@@ -532,7 +517,7 @@ fn pulse_zone_animation(
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
     for (material_handle, anim) in &query {
-        if let Some(material) = materials.get_mut(material_handle) {
+        if let Some(material) = materials.get_mut(&material_handle.0) {
             // Pulse alpha between initial_alpha and initial_alpha + 0.2
             let pulse = (time.elapsed_secs() * 3.0).sin() * 0.5 + 0.5; // Ranges from 0 to 1
             material.color.set_alpha(anim.initial_alpha + pulse * 0.2);
@@ -551,5 +536,5 @@ pub fn spawn_level(mut ev: EventWriter<SpawnLevel>) {
     ));
 
     // Alternative: Load a programmatic level
-    // ev.write(SpawnLevel::Programmatic("tutorial_code".to_string()));
+    // ev.send(SpawnLevel::Programmatic("tutorial_code".to_string()));
 }
