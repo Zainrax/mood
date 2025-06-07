@@ -1,0 +1,61 @@
+{
+  "name": "The Walled Garden",
+  "play_area": [
+    900.0,
+    600.0
+  ],
+  "moodels": [
+    {
+      "mood": "Neutral",
+      "position": [
+        -100.0,
+        50.0
+      ]
+    },
+    {
+      "mood": "Happy",
+      "position": [
+        0.0,
+        0.0
+      ]
+    }
+  ],
+  "obstacles": [
+    {
+      "position": [
+        0.0,
+        150.0
+      ],
+      "type": "Wall",
+      "size": [
+        400.0,
+        20.0
+      ]
+    },
+    {
+      "position": [
+        -200.0,
+        -50.0
+      ],
+      "type": "Wall",
+      "size": [
+        20.0,
+        300.0
+      ]
+    }
+  ],
+  "goal_zones": [
+    {
+      "position": [
+        350.0,
+        -200.0
+      ],
+      "size": [
+        150.0,
+        150.0
+      ],
+      "target_mood": "Happy",
+      "required_count": 1
+    }
+  ]
+}

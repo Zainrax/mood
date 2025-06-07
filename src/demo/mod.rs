@@ -8,6 +8,7 @@ use bevy::prelude::*;
 pub mod ai;
 mod animation;
 pub mod level;
+mod level_library;
 pub mod mood;
 mod movement;
 pub mod player;

@@ -89,7 +89,7 @@ pub(super) fn plugin(app: &mut App) {
 }
 
 /// The different emotional states a Moodel can have
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect, serde::Serialize, serde::Deserialize)]
 #[reflect(Component)]
 pub enum Mood {
     Neutral,

@@ -14,6 +14,7 @@ mod theme;
 
 use avian2d::prelude::*;
 use bevy::{asset::AssetMetaCheck, prelude::*};
+use bevy_common_assets::json::JsonAssetPlugin;
 use bevy_egui::EguiPlugin;
 #[cfg(feature = "dev")]
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
@@ -49,6 +50,9 @@ impl Plugin for AppPlugin {
 
         // Add Avian2D physics plugin
         app.add_plugins(PhysicsPlugins::default().with_length_unit(100.0));
+        
+        // Add JSON asset plugin for Level assets
+        app.add_plugins(JsonAssetPlugin::<crate::demo::level::Level>::new(&["level.json"]));
 
         // Add other plugins.
         app.add_plugins((
