@@ -12,6 +12,7 @@ mod level_library;
 pub mod mood;
 mod movement;
 pub mod player;
+mod player_input;
 
 pub(super) fn plugin(app: &mut App) {
     app.add_plugins((
@@ -21,5 +22,6 @@ pub(super) fn plugin(app: &mut App) {
         mood::plugin,
         movement::plugin,
         player::plugin,
+        player_input::plugin,
     ));
 }

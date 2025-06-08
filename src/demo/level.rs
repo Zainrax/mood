@@ -2,21 +2,27 @@
 //! Includes enhanced visuals, real-time feedback, and robust event-driven zone tracking.
 
 use avian2d::prelude::*;
-use bevy::prelude::*;
 use bevy::ecs::system::RunSystemOnce;
+use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use super::level_library;
 use crate::{
+    AppSystems, COLLISION_LAYER_MOODEL, COLLISION_LAYER_OBSTACLE, PausableSystems,
     asset_tracking::LoadResource,
-    audio::{music, PlaySound},
-    AppSystems, PausableSystems,
+    audio::{PlaySound, music},
     demo::{
-        mood::{spawn_moodel_bundle, Mood, MoodAssets},
+        ai::ObstacleCollider,
+        mood::{Mood, MoodAssets, select_mood, spawn_moodel_bundle},
         movement::PlayArea,
+        player_input::handle_background_click,
     },
     screens::Screen,
+};
+use bevy::picking::{
+    Pickable,
+    prelude::{Click, Pointer},
 };
 
 pub(super) fn plugin(app: &mut App) {
@@ -230,7 +236,7 @@ fn process_loaded_level(
 
 // Standard Bevy system for spawning level entities
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_level_entities(
+fn spawn_level_entities(
     mut commands: Commands,
     active_level: Res<ActiveLevel>,
     mut play_area: ResMut<PlayArea>,
@@ -255,17 +261,20 @@ pub fn spawn_level_entities(
 
     // Spawn Moodels
     for data in &level.moodels {
-        commands.spawn((
-            spawn_moodel_bundle(
-                data.mood,
-                &mood_assets,
-                data.position.extend(0.0),
-                350.0,
-                time.elapsed_secs(),
-            ),
-            LevelEntity,
-            StateScoped(Screen::Gameplay),
-        ));
+        // SIMPLIFIED: Just spawn the bundle. All logic is self-contained.
+        commands
+            .spawn((
+                spawn_moodel_bundle(
+                    data.mood,
+                    &mood_assets,
+                    data.position.extend(0.0),
+                    350.0,
+                    time.elapsed_secs(),
+                ),
+                LevelEntity,
+                StateScoped(Screen::Gameplay),
+            ))
+            .observe(select_mood);
     }
 
     // Spawn Obstacles
@@ -273,45 +282,59 @@ pub fn spawn_level_entities(
         match &data.kind {
             ObstacleKind::Wall { size } => {
                 let border_thickness = 4.0;
-                commands.spawn((
-                    Name::new("Wall"),
-                    Obstacle, LevelEntity, StateScoped(Screen::Gameplay),
-                    Transform::from_xyz(data.position.x, data.position.y, 0.0),
-                    RigidBody::Static,
-                    Collider::rectangle(size.x, size.y),
-                )).with_children(|parent| {
-                    parent.spawn((
-                        Mesh2d(meshes.add(Rectangle::new(size.x, size.y))),
-                        MeshMaterial2d(materials.add(Color::srgb(0.25, 0.25, 0.3))),
-                        Transform::from_xyz(0.0, 0.0, 0.0),
-                    ));
-                    parent.spawn((
-                        Mesh2d(meshes.add(Rectangle::new(size.x - border_thickness, size.y - border_thickness))),
-                        MeshMaterial2d(materials.add(Color::srgb(0.4, 0.4, 0.5))),
-                        Transform::from_xyz(0.0, 0.0, 0.1),
-                    ));
-                });
+                commands
+                    .spawn((
+                        Name::new("Wall"),
+                        Obstacle,
+                        LevelEntity,
+                        StateScoped(Screen::Gameplay),
+                        // NEW: Add the ObstacleCollider marker for the AI to see
+                        ObstacleCollider,
+                        Transform::from_xyz(data.position.x, data.position.y, 0.0),
+                        RigidBody::Static,
+                        Collider::rectangle(size.x, size.y),
+                        // MODIFIED: Assign to the correct collision layer
+                        CollisionLayers::new(COLLISION_LAYER_OBSTACLE, COLLISION_LAYER_MOODEL),
+                    ))
+                    .with_children(|parent| {
+                        parent.spawn((
+                            Mesh2d(meshes.add(Rectangle::new(size.x, size.y))),
+                            MeshMaterial2d(materials.add(Color::srgb(0.25, 0.25, 0.3))),
+                            Transform::from_xyz(0.0, 0.0, 0.0),
+                        ));
+                        parent.spawn((
+                            Mesh2d(meshes.add(Rectangle::new(
+                                size.x - border_thickness,
+                                size.y - border_thickness,
+                            ))),
+                            MeshMaterial2d(materials.add(Color::srgb(0.4, 0.4, 0.5))),
+                            Transform::from_xyz(0.0, 0.0, 0.1),
+                        ));
+                    });
             }
         }
     }
 
     // Spawn Goal Zones with modern Text API
     for data in &level.goal_zones {
-        let zone_entity = commands.spawn((
-            Name::new(format!("{:?} Goal Zone", data.target_mood)),
-            GoalZone {
-                target_mood: data.target_mood,
-                required_count: data.required_count,
-                ..default()
-            },
-            LevelEntity, StateScoped(Screen::Gameplay),
-            Mesh2d(meshes.add(Rectangle::new(data.size.x, data.size.y))),
-            MeshMaterial2d(materials.add(data.target_mood.color().with_alpha(0.2))),
-            Transform::from_xyz(data.position.x, data.position.y, -1.0),
-            RigidBody::Static,
-            Collider::rectangle(data.size.x, data.size.y),
-            Sensor,
-        )).id();
+        let zone_entity = commands
+            .spawn((
+                Name::new(format!("{:?} Goal Zone", data.target_mood)),
+                GoalZone {
+                    target_mood: data.target_mood,
+                    required_count: data.required_count,
+                    ..default()
+                },
+                LevelEntity,
+                StateScoped(Screen::Gameplay),
+                Mesh2d(meshes.add(Rectangle::new(data.size.x, data.size.y))),
+                MeshMaterial2d(materials.add(data.target_mood.color().with_alpha(0.2))),
+                Transform::from_xyz(data.position.x, data.position.y, -1.0),
+                RigidBody::Static,
+                Collider::rectangle(data.size.x, data.size.y),
+                Sensor,
+            ))
+            .id();
 
         // Spawn the text as a child of the zone
         commands.entity(zone_entity).with_children(|parent| {
@@ -337,6 +360,22 @@ pub fn spawn_level_entities(
         LevelEntity,
         StateScoped(Screen::Gameplay),
     ));
+
+    // Spawn a large, pickable background plane for deselection
+    commands
+        .spawn((
+            Name::new("Background"),
+            Sprite {
+                color: Color::NONE, // Invisible
+                custom_size: Some(level.play_area * 2.0),
+                ..default()
+            },
+            Transform::from_xyz(0.0, 0.0, -10.0),
+            Pickable::default(),
+            LevelEntity,
+            StateScoped(Screen::Gameplay),
+        ))
+        .observe(handle_background_click);
 }
 
 // One-shot system wrapper for world access
@@ -377,8 +416,11 @@ fn handle_zone_collisions(
 ) {
     // Handle entities entering the zone
     for CollisionStarted(entity1, entity2) in started.read() {
-        let (moodel_entity, zone_entity) = get_moodel_and_zone(*entity1, *entity2, &moodel_query, &zone_query);
-        if moodel_entity.is_none() { continue; }
+        let (moodel_entity, zone_entity) =
+            get_moodel_and_zone(*entity1, *entity2, &moodel_query, &zone_query);
+        if moodel_entity.is_none() {
+            continue;
+        }
         let moodel_entity = moodel_entity.unwrap();
         let zone_entity = zone_entity.unwrap();
 
@@ -399,8 +441,11 @@ fn handle_zone_collisions(
 
     // Handle entities leaving the zone
     for CollisionEnded(entity1, entity2) in ended.read() {
-        let (moodel_entity, zone_entity) = get_moodel_and_zone(*entity1, *entity2, &moodel_query, &zone_query);
-        if moodel_entity.is_none() { continue; }
+        let (moodel_entity, zone_entity) =
+            get_moodel_and_zone(*entity1, *entity2, &moodel_query, &zone_query);
+        if moodel_entity.is_none() {
+            continue;
+        }
         let moodel_entity = moodel_entity.unwrap();
         let zone_entity = zone_entity.unwrap();
 
@@ -468,7 +513,9 @@ fn update_zone_visuals(
         let initial_alpha = if goal_zone.is_satisfied { 0.6 } else { 0.2 };
 
         if goal_zone.is_satisfied {
-            commands.entity(zone_entity).insert(PulseAnimation { initial_alpha });
+            commands
+                .entity(zone_entity)
+                .insert(PulseAnimation { initial_alpha });
         } else {
             commands.entity(zone_entity).remove::<PulseAnimation>();
         }

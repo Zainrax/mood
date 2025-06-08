@@ -3583,6 +3583,7 @@ dependencies = [
  "bevy-inspector-egui",
  "bevy_common_assets",
  "bevy_egui",
+ "bevy_picking",
  "bevy_vello",
  "log",
  "noisy_bevy",

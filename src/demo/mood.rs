@@ -1,13 +1,19 @@
 //! Mood system for Moodels - defines different emotional states and conversion logic.
 
 use avian2d::prelude::*;
+use bevy::ecs::system::entity_command::observe;
 use bevy::prelude::*;
+use bevy_picking::prelude::{Click, Pickable, Pointer};
 use rand::Rng;
 use std::collections::HashMap;
 
 use crate::demo::ai::{AiAction, AiConfig, AiEntity, AiMagnetism, AiWanderState};
 use crate::demo::movement::{MovementController, MovementSmoothing, PlayAreaBounded};
-use crate::{AppSystems, PausableSystems, asset_tracking::LoadResource};
+use crate::demo::player_input::{Selectable, Selected};
+use crate::{
+    AppSystems, COLLISION_LAYER_MOODEL, COLLISION_LAYER_OBSTACLE, PausableSystems,
+    asset_tracking::LoadResource,
+};
 
 /// Macro to define mood interactions in a clear, non-repetitive, and correct way.
 ///
@@ -73,6 +79,8 @@ pub(super) fn plugin(app: &mut App) {
     app.load_resource::<MoodAssets>();
     app.init_resource::<MoodStatsTimer>();
 
+    // Selection logic is now self-contained in spawn_moodel_bundle
+
     // Mood conversion systems
     app.add_systems(
         Update,
@@ -87,6 +95,8 @@ pub(super) fn plugin(app: &mut App) {
             .in_set(PausableSystems),
     );
 }
+
+// Selection logic moved to spawn_moodel_bundle for self-contained entity configuration
 
 /// The different emotional states a Moodel can have
 #[derive(
@@ -285,9 +295,9 @@ fn update_entity_mood(
         mood_entity.mood_stability = 0.0; // Reset stability on change
 
         // Emit mood change event for audio system
-        sfx_writer.write(crate::audio::PlaySound::MoodChanged { 
-            from: old_mood, 
-            to: new_mood 
+        sfx_writer.write(crate::audio::PlaySound::MoodChanged {
+            from: old_mood,
+            to: new_mood,
         });
 
         #[cfg(feature = "dev")]
@@ -373,9 +383,9 @@ fn handle_collision_events(
             let (new_mood1, new_mood2) = get_mood_interaction(*mood1, *mood2);
 
             // Emit collision event for audio system
-            sfx_writer.write(crate::audio::PlaySound::MoodCollision { 
-                mood1: *mood1, 
-                mood2: *mood2 
+            sfx_writer.write(crate::audio::PlaySound::MoodCollision {
+                mood1: *mood1,
+                mood2: *mood2,
             });
 
             #[cfg(feature = "dev")]
@@ -667,7 +677,7 @@ pub fn spawn_moodel_bundle(
     max_speed: f32,
     current_time: f32,
 ) -> impl Bundle {
-    (
+    let moodel_tuple = (
         MoodelBundle {
             name: Name::new(format!("{:?} Moodel", mood)),
             ai_entity: AiEntity,
@@ -719,8 +729,11 @@ pub fn spawn_moodel_bundle(
             collider: Collider::circle(50.0), // Larger radius for better collision detection
             linear_velocity: LinearVelocity::default(),
             angular_velocity: AngularVelocity::default(),
-            collision_layers: CollisionLayers::default(), // Default collision layers
-            collision_events: CollisionEventsEnabled,     // Enable collision events
+            collision_layers: CollisionLayers::new(
+                COLLISION_LAYER_MOODEL,
+                COLLISION_LAYER_MOODEL | COLLISION_LAYER_OBSTACLE,
+            ),
+            collision_events: CollisionEventsEnabled, // Enable collision events
             restitution: Restitution::new(match mood {
                 Mood::Happy => 0.9, // Happy moodels bounce more
                 Mood::Rage => 0.7,  // Rage moodels have harder bounces
@@ -740,7 +753,30 @@ pub fn spawn_moodel_bundle(
             separation_strength: 0.1,
             separation_distance: 20.0,
         },
-    )
+        // The Pickable component makes the entity detectable by the picking backend.
+        Pickable::default(),
+    );
+
+    // Conditionally add Selectable and the event listener based on Mood.
+    // Rage Moodels are pickable (so clicking them counts as a "miss" for deselection)
+    // but not selectable.
+    // Conditionally add the `Selectable` marker and the click observer.
+    // This is the modern, correct way to handle picking interaction.
+    // Rage moodels are not selectable.
+    (moodel_tuple, Selectable)
+}
+
+pub fn select_mood(
+    trigger: Trigger<Pointer<Click>>,
+    mut commands: Commands,
+    q_selected: Query<Entity, With<Selected>>,
+) {
+    if let Ok(old_selection) = q_selected.single() {
+        commands.entity(old_selection).remove::<Selected>();
+    }
+    // Add the `Selected` component to the entity that was clicked.
+    commands.entity(trigger.target()).insert(Selected);
+    info!("Selected entity {:?}", trigger.target());
 }
 
 /// Creates a mood object bundle with specific shape and properties

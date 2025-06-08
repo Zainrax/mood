@@ -16,8 +16,13 @@ use avian2d::prelude::*;
 use bevy::{asset::AssetMetaCheck, prelude::*};
 use bevy_common_assets::json::JsonAssetPlugin;
 use bevy_egui::EguiPlugin;
+// Picking is now included in DefaultPlugins, no separate import needed
 #[cfg(feature = "dev")]
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
+
+// Collision layers for separating Moodels and obstacles
+pub const COLLISION_LAYER_MOODEL: LayerMask = LayerMask(0b0001);
+pub const COLLISION_LAYER_OBSTACLE: LayerMask = LayerMask(0b0010);
 
 fn main() -> AppExit {
     App::new().add_plugins(AppPlugin).run()

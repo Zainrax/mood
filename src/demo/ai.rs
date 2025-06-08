@@ -5,12 +5,13 @@
 //! and state-based abilities, all determined by their current `Mood`.
 
 use bevy::prelude::*;
+use avian2d::prelude::*;
 use noisy_bevy::fbm_simplex_2d_seeded;
 use rand::Rng;
 use std::ops::Range;
 
 use crate::{
-    AppSystems, PausableSystems,
+    AppSystems, PausableSystems, COLLISION_LAYER_OBSTACLE,
     demo::{
         mood::Mood,
         movement::{MovementController, PlayArea},
@@ -129,9 +130,15 @@ pub struct AiMagnetism {
     pub separation_distance: f32,
 }
 
+/// A component to identify static obstacles for AI raycasting.
+#[derive(Component)]
+pub struct ObstacleCollider;
+
 /// Represents the specific action an AI is currently performing.
 #[derive(Debug, Clone, Reflect, PartialEq)]
 pub enum AiAction {
+    /// Highest priority: moving to a player-commanded target using steering behaviors.
+    MovingToTarget { destination: Vec2 },
     /// Default state: moving around using noise-based wandering.
     Wandering,
     /// A rage-specific state: pausing to lock onto a target.
@@ -173,18 +180,17 @@ impl AiWanderState {
 /// System that updates the AI's core action state and base movement intent.
 fn update_ai_behavior(
     time: Res<Time>,
-    config: Res<AiConfig>, // Get the config resource
+    config: Res<AiConfig>,
     all_moodels: Query<(Entity, &Transform, &Mood)>,
-    mut ai_query: Query<
-        (
-            Entity,
-            &Transform,
-            &mut MovementController,
-            &mut AiWanderState,
-            &Mood,
-        ),
-        With<AiEntity>,
-    >,
+    mut ai_query: Query<(
+        Entity,
+        &Transform,
+        &mut MovementController,
+        &mut AiWanderState,
+        &Mood,
+        &LinearVelocity,
+    ), With<AiEntity>>,
+    mut spatial_query: SpatialQuery,
 ) {
     let mut rng = rand::rng();
 
@@ -193,11 +199,38 @@ fn update_ai_behavior(
         .filter(|(_, _, mood)| **mood != Mood::Rage)
         .collect();
 
-    for (entity, transform, mut controller, mut wander_state, mood) in &mut ai_query {
+    for (entity, transform, mut controller, mut wander_state, mood, velocity) in &mut ai_query {
         wander_state.state_timer.tick(time.delta());
         wander_state.ability_cooldown.tick(time.delta());
+        let current_pos = transform.translation.truncate();
 
         match wander_state.action.clone() {
+            // --- NEW, HIGHEST PRIORITY STEERING BEHAVIOR ---
+            AiAction::MovingToTarget { destination } => {
+                // Blend forces: Seek, Obstacle Avoidance, and Wander
+                let seek_force = (destination - current_pos).normalize_or_zero();
+                let avoidance_force = calculate_avoidance_force(
+                    &mut spatial_query,
+                    current_pos,
+                    velocity.0, // Use actual velocity from Avian2D physics
+                    entity,
+                );
+                let wander_force = get_wander_intent(mood, &mut wander_state, &time, &mut rng);
+
+                // Combine forces with weights
+                let final_intent = (seek_force * 1.0)
+                    + (avoidance_force * 1.5) // Avoidance is high priority
+                    + (wander_force * 0.3);   // Wander is a subtle addition
+
+                controller.intent = final_intent.normalize_or_zero();
+
+                // Check for arrival
+                if current_pos.distance(destination) < 25.0 {
+                    info!("Entity {:?} reached commanded destination.", entity);
+                    wander_state.action = AiAction::Wandering;
+                    controller.intent = Vec2::ZERO;
+                }
+            }
             AiAction::Wandering => {
                 if *mood == Mood::Rage && wander_state.ability_cooldown.just_finished() {
                     let closest_target = potential_targets
@@ -288,7 +321,7 @@ fn update_ai_magnetism(
 
     for (entity, transform, mood, mut controller, wander_state, magnetism) in &mut query {
         // PRIORITY OVERRIDE: If the AI is not wandering, skip all magnetism.
-        if wander_state.action != AiAction::Wandering {
+        if !matches!(wander_state.action, AiAction::Wandering) {
             continue;
         }
         let mut cohesion_vec = Vec2::ZERO;
@@ -347,7 +380,7 @@ fn update_ai_boundary_avoidance(
 
     for (transform, mut controller, wander_state) in &mut query {
         // PRIORITY OVERRIDE: If the AI is not wandering, skip boundary avoidance.
-        if wander_state.action != AiAction::Wandering {
+        if !matches!(wander_state.action, AiAction::Wandering) {
             continue;
         }
         let pos = transform.translation.truncate();
@@ -442,4 +475,49 @@ fn get_attraction_factor(my_mood: Mood, other_mood: Mood) -> f32 {
         (Neutral, _) => -0.1,
         _ => 0.0,
     }
+}
+
+/// Helper function that uses raycasting to calculate a steering force to avoid obstacles.
+fn calculate_avoidance_force(
+    spatial_query: &mut SpatialQuery,
+    position: Vec2,
+    velocity: Vec2,
+    self_entity: Entity,
+) -> Vec2 {
+    let mut avoidance_force = Vec2::ZERO;
+    if velocity.length_squared() < 0.1 { return avoidance_force; } // No avoidance if not moving
+
+    // How far ahead to "see" for obstacles. Scales with speed.
+    let look_ahead_distance = 50.0 + velocity.length() * 0.2;
+    let forward_dir = velocity.normalize();
+
+    // Define "whiskers" for raycasting (forward, and 30 degrees left/right)
+    let whisker_angle = 30.0f32.to_radians();
+    let whiskers = [
+        forward_dir,
+        Mat2::from_angle(whisker_angle) * forward_dir,
+        Mat2::from_angle(-whisker_angle) * forward_dir,
+    ];
+
+    for &dir in &whiskers {
+        // Continue if the direction is somehow zero to prevent panics
+        if dir == Vec2::ZERO { continue; }
+
+        if let Some(hit) = spatial_query.cast_ray(
+            position,
+            Dir2::new(dir).unwrap(), // Use safe Dir2 creation
+            look_ahead_distance,
+            true,
+            // Only "see" obstacles, not other Moodels
+            &SpatialQueryFilter::from_excluded_entities([self_entity])
+                .with_mask(COLLISION_LAYER_OBSTACLE),
+        ) {
+            // Force is stronger the closer the obstacle is, and perpendicular to the obstacle normal.
+            let strength = (look_ahead_distance - hit.distance) / look_ahead_distance;
+            // The normal points from the obstacle towards the ray's origin. We want to steer along it.
+            avoidance_force += hit.normal * strength;
+        }
+    }
+
+    avoidance_force.normalize_or_zero()
 }
